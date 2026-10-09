@@ -17,12 +17,12 @@ Features:
 
 ## ⬇️ Download (Windows)
 
-Every push to `main` builds a portable Windows app via GitHub Actions —
-grab `NovaIPTVPlayer-windows.zip` from the latest
+Every push to `main` builds a standalone Windows `.exe` via GitHub Actions —
+grab `NovaIPTVPlayer.exe` from the latest
 [Actions run](../../actions/workflows/build-windows.yml)
-(under *Artifacts*). Pushing a tag like `v1.0.0` also attaches the zip to a
-GitHub Release automatically. Just unzip and run `NovaIPTVPlayer.exe`
-(no install needed — the FFmpeg decoder is bundled inside).
+(under *Artifacts*). Pushing a tag like `v1.0.0` also attaches the exe to a
+GitHub Release automatically. Just download and run it —
+no install needed (the FFmpeg decoder is bundled inside).
 
 ## Requirements
 
