@@ -271,6 +271,71 @@ QPushButton#dangerBtn:hover {{
     background: {c["red"]};
     color: white;
 }}
+/* provider switcher button (sidebar) */
+QPushButton#providerBtn {{
+    background: {c["surface2"]};
+    border: 1px solid {c["border"]};
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-size: 9pt;
+    text-align: left;
+    color: {c["text"]};
+}}
+QPushButton#providerBtn:hover {{
+    border-color: {c["accent"]};
+}}
+/* login screen */
+QWidget#loginOverlay {{
+    background: {c["bg"]};
+}}
+QFrame#loginCard {{
+    background: {c["surface"]};
+    border: 1px solid {c["border"]};
+    border-radius: 16px;
+}}
+QLabel#loginSub {{
+    color: {c["muted"]};
+    font-size: 10pt;
+}}
+QPushButton#loginTab {{
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0px;
+    color: {c["muted"]};
+    font-size: 10pt;
+    font-weight: 600;
+    padding: 10px 16px;
+}}
+QPushButton#loginTab:checked {{
+    color: {c["text"]};
+    border-bottom: 2px solid {c["accent"]};
+}}
+QLabel#loginError {{
+    color: {c["red"]};
+    font-size: 9pt;
+}}
+/* inactive-account banner */
+QFrame#accountBanner {{
+    background: #2a1418;
+    border: 1px solid {c["red"]};
+    border-radius: 10px;
+    margin: 8px 16px 0px 16px;
+}}
+/* dialogs */
+QLabel#dlgTitle {{
+    font-size: 14pt;
+    font-weight: 700;
+}}
+QLabel#goldLabel {{
+    color: #fbbf24;
+    font-weight: 700;
+    font-size: 11pt;
+}}
+QLabel#plotLabel {{
+    color: {c["text"]};
+    font-size: 10pt;
+}}
 QPushButton#ctlBtn {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
