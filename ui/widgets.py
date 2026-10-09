@@ -397,7 +397,10 @@ def quality_of(channel: Channel) -> str:
     n = channel.name.lower()
     if "4k" in n or "uhd" in n:
         return "4K"
+    if "fhd" in n or "1080" in n:
+        return "FHD"
     return "HD"
+
 
 
 # -- async image loading ----------------------------------------------------
@@ -583,7 +586,7 @@ class SectionHeader(QWidget):
 
 
 class StatPill(QLabel):
-    """Connection status pill: green dot LIVE CONNECTED / grey OFFLINE."""
+    """Connection status pill: emerald beacon LIVE CONNECTED / slate OFFLINE."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -594,8 +597,8 @@ class StatPill(QLabel):
         dot = COLORS["green"] if ok else COLORS["muted"]
         text = "LIVE CONNECTED" if ok else "OFFLINE"
         self.setText(
-            f'<span style="color:{dot}; font-size:12px;">●</span>'
-            f'&nbsp;&nbsp;{text}'
+            f'<span style="color:{dot}; font-size:11px;">●</span>'
+            f'&nbsp;&nbsp;<span style="letter-spacing:0.8px;">{text}</span>'
         )
 
 
@@ -603,8 +606,9 @@ class SearchBar(QLineEdit):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("searchBar")
-        self.setPlaceholderText("Search channels, movies, series... (/ to focus)")
+        self.setPlaceholderText("Search channels, movies, series...  (Ctrl+K or /)")
         self.setClearButtonEnabled(True)
+
 
 
 class ElidedLabel(QLabel):
@@ -938,7 +942,72 @@ class VideoWidget(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
 
 
+class AudioVisualizer(QWidget):
+    """Dynamic bouncing equalizer spectrum bars drawn with QPainter."""
+
+    def __init__(self, parent=None, bar_count: int = 4) -> None:
+        super().__init__(parent)
+        self._bar_count = bar_count
+        self._phase = 0.0
+        self._active = False
+        self.setFixedSize(26, 18)
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)  # ~20 FPS
+        self._timer.timeout.connect(self._tick)
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if active and animations_enabled():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+            self.update()
+
+    def start(self) -> None:
+        self.set_active(True)
+
+    def stop(self) -> None:
+        self.set_active(False)
+
+    def _tick(self) -> None:
+        self._phase += 0.28
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = float(self.width())
+        h = float(self.height())
+        bar_w = 3.5
+        gap = 2.5
+        total_w = self._bar_count * bar_w + (self._bar_count - 1) * gap
+        start_x = (w - total_w) / 2.0
+
+        for i in range(self._bar_count):
+            if self._active:
+                val1 = (math.sin(self._phase + i * 1.4) + 1.0) / 2.0
+                val2 = (math.cos(self._phase * 0.75 + i * 0.85) + 1.0) / 2.0
+                norm = 0.25 + 0.70 * ((val1 + val2) / 2.0)
+            else:
+                norm = 0.20
+
+            bar_h = max(3.0, h * norm)
+            x = start_x + i * (bar_w + gap)
+            y = h - bar_h
+
+            grad = QLinearGradient(x, y, x, h)
+            grad.setColorAt(0.0, QColor(COLORS.get("cyan", "#06b6d4")))
+            grad.setColorAt(1.0, QColor(COLORS.get("accent", "#8b5cf6")))
+
+            p.setPen(Qt.NoPen)
+            p.setBrush(grad)
+            p.drawRoundedRect(QRectF(x, y, bar_w, bar_h), 1.5, 1.5)
+        p.end()
+
+
 # -- channel card / grid -----------------------------------------------------
+
 
 class _LogoArea(QWidget):
     """Logo with LIVE / quality badges overlaid (top-left / top-right)."""
@@ -1353,9 +1422,13 @@ class HeroCard(QFrame):
         left.setSpacing(8)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
         self.live_badge = QLabel('<span style="font-size:9px;">●</span> LIVE')
         self.live_badge.setObjectName("liveBadge")
         top_row.addWidget(self.live_badge)
+        self.quality_tag = QLabel("4K UHD")
+        self.quality_tag.setObjectName("qualityBadge")
+        top_row.addWidget(self.quality_tag)
         self.kicker = QLabel("FEATURED")
         self.kicker.setObjectName("heroKicker")
         top_row.addWidget(self.kicker)
@@ -1434,14 +1507,19 @@ class HeroCard(QFrame):
             self.subtitle.setText(
                 "Add an M3U playlist to browse live TV, movies and series.")
             self.kicker.setText("FEATURED")
+            self.quality_tag.hide()
             self.art.setPixmap(poster_pixmap(320, 190, "", "hero-empty"))
             return
         self.kicker.setText(channel.display_group.upper())
         self.title.setText(channel.name)
+        q = quality_of(channel)
+        self.quality_tag.setText(f"★ {q} ULTRA HD" if q == "4K" else f"★ {q}")
+        self.quality_tag.show()
         sub = "Live coverage"
         if now:
             sub = f"{now.title}  •  {now.start.strftime('%H:%M')}–{now.stop.strftime('%H:%M')}"
         elif channel.kind != "live":
             sub = channel.display_group
         self.subtitle.setText(sub)
+
         self.art.setPixmap(poster_pixmap(320, 190, channel.name, channel.url))

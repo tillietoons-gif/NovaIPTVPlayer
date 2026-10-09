@@ -48,8 +48,9 @@ from ui.widgets import (
     ChannelGrid, SearchBar, VideoWidget, NavButton, IconButton, WinButton,
     SectionHeader, StatPill, ChannelCard, PosterCard, HeroCard,
     LogoLabel, brand_pixmap, avatar_pixmap, make_icon, poster_pixmap,
-    ElidedLabel, EmptyState, SkeletonCard, Drawer,
+    ElidedLabel, EmptyState, SkeletonCard, Drawer, AudioVisualizer,
 )
+
 
 
 # -- background loaders (Qt threads, not asyncio: simpler on Windows) --------
@@ -2000,6 +2001,15 @@ class MainWindow(QMainWindow):
                 return
             super().keyPressEvent(event)
             return
+        mods = event.modifiers()
+        if (mods & Qt.ControlModifier and key == Qt.Key_K) or key == Qt.Key_Slash:
+            if self._search_narrow and not self._search_overlay.isVisible():
+                self._toggle_search_overlay()
+            else:
+                self.search.setFocus()
+                self.search.selectAll()
+            event.accept()
+            return
         focus = self.focusWidget()
         if isinstance(focus, (QLineEdit, QComboBox, QSlider)):
             super().keyPressEvent(event)
@@ -2026,13 +2036,8 @@ class MainWindow(QMainWindow):
             self._play_prev()
         elif key == Qt.Key_Right:
             self._play_next()
-        elif key == Qt.Key_Slash:
-            if self._search_narrow and not self._search_overlay.isVisible():
-                self._toggle_search_overlay()
-            else:
-                self.search.setFocus()
-                self.search.selectAll()
         elif key == Qt.Key_Up:
+
             v = min(125, self.vol.value() + 5)
             self.vol.setValue(v)
             self._flash_status(f"Volume: {v}%", 1500)
@@ -2514,10 +2519,14 @@ class MainWindow(QMainWindow):
         hours = 4
         guide_end = guide_start + timedelta(hours=hours)
 
+        now = datetime.now(timezone.utc)
         if hasattr(self, "guide_window_lbl"):
+            is_live_now = (guide_start <= now <= guide_end)
+            live_prefix = f"<span style='color:{COLORS['red']}; font-weight:800;'>● LIVE NOW</span>&nbsp;&nbsp;•&nbsp;&nbsp;" if is_live_now else ""
             self.guide_window_lbl.setText(
-                f"{guide_start.strftime('%a, %b %d')} • {guide_start.strftime('%H:%M')} – {guide_end.strftime('%H:%M')}"
+                f"{live_prefix}{guide_start.strftime('%a, %b %d')} • {guide_start.strftime('%H:%M')} – {guide_end.strftime('%H:%M')}"
             )
+
 
         _PX_PER_MIN = 3.6
         total_mins = hours * 60
@@ -2880,9 +2889,16 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(16, 18, 16, 16)
         lay.setSpacing(10)
 
+        np_head = QHBoxLayout()
         t = QLabel("Now Playing")
         t.setObjectName("sideTitle")
-        lay.addWidget(t)
+        np_head.addWidget(t)
+        np_head.addStretch(1)
+        self.np_visualizer = AudioVisualizer()
+        self.np_visualizer.setToolTip("Audio Equalizer")
+        np_head.addWidget(self.np_visualizer)
+        lay.addLayout(np_head)
+
 
         card = QFrame()
         card.setObjectName("sideCard")
@@ -4120,8 +4136,11 @@ class MainWindow(QMainWindow):
 
     def _on_player_state(self, state: str) -> None:
         self._player_state = state
+        if hasattr(self, "np_visualizer"):
+            self.np_visualizer.set_active(state == "playing")
         if state == "playing":
             self.pp_btn.setIcon(make_icon("pause", 18))
+
         elif state == "paused":
             self.pp_btn.setIcon(make_icon("play", 18))
         elif state in ("stopped", "error"):

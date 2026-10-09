@@ -9,30 +9,42 @@ from __future__ import annotations
 from PySide6.QtGui import QFont
 
 COLORS = {
-    "bg": "#0b0d13",
-    "surface": "#141821",
-    "surface2": "#1a1f2b",
-    "card": "#1e2330",
-    "border": "#232b3d",
+    "bg": "#090b10",
+    "surface": "#0f131d",
+    "surface2": "#151b28",
+    "card": "#181f2f",
+    "card_hover": "#20293d",
+    "border": "#222c3f",
+    "border_light": "rgba(255, 255, 255, 0.08)",
+    "border_glow": "rgba(139, 92, 246, 0.45)",
     "accent": "#8b5cf6",
+    "accent_light": "#a78bfa",
     "accent2": "#6d28d9",
-    "text": "#f2f3f7",
-    "muted": "#8b91a7",
-    "green": "#22c55e",
+    "cyan": "#06b6d4",
+    "cyan_glow": "rgba(6, 182, 212, 0.25)",
+    "text": "#f8fafc",
+    "muted": "#94a3b8",
+    "green": "#10b981",
     "red": "#ef4444",
+    "gold": "#f59e0b",
 }
 
 GRADIENT = (
-    "qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-    " stop:0 #8b5cf6, stop:1 #6d28d9)"
+    "qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+    " stop:0 #8b5cf6, stop:0.6 #7c3aed, stop:1 #6d28d9)"
 )
+HERO_GRADIENT = (
+    "qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+    " stop:0 #1a152e, stop:0.45 #121626, stop:1 #0c0f18)"
+)
+
 
 
 def build_stylesheet() -> str:
     c = COLORS
     return f"""
 * {{
-    font-family: "Segoe UI", "Inter", sans-serif;
+    font-family: "Segoe UI", "Inter", -apple-system, sans-serif;
     font-size: 10pt;
     color: {c["text"]};
 }}
@@ -45,36 +57,43 @@ QWidget#central {{
 QToolTip {{
     background: {c["surface2"]};
     color: {c["text"]};
-    border: 1px solid {c["border"]};
-    padding: 4px 8px;
+    border: 1px solid rgba(139, 92, 246, 0.35);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 9pt;
 }}
 
 /* ================= sidebar ================= */
 QWidget#sidebar {{
     background: {c["surface"]};
+    border-right: 1px solid {c["border"]};
 }}
 QPushButton#navBtn {{
     background: transparent;
-    border: none;
-    border-radius: 10px;
-    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    padding: 10px 14px;
     text-align: left;
     font-size: 10pt;
+    font-weight: 500;
     color: {c["muted"]};
 }}
 QPushButton#navBtn:hover {{
-    background: {c["surface2"]};
+    background: rgba(255, 255, 255, 0.04);
     color: {c["text"]};
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }}
 QPushButton#navBtn:checked {{
     background: {GRADIENT};
     color: white;
-    font-weight: 600;
+    font-weight: 700;
+    border: 1px solid rgba(255, 255, 255, 0.15);
 }}
 QLabel#brandTitle {{
     font-size: 13pt;
     font-weight: 800;
     letter-spacing: 1px;
+    color: #ffffff;
 }}
 QWidget#sideDivider {{
     background: {c["border"]};
@@ -93,26 +112,29 @@ QLabel#userName {{
 /* ================= top bar ================= */
 QWidget#topbar {{
     background: {c["bg"]};
+    border-bottom: 1px solid {c["border"]};
 }}
 QLabel#connPill {{
-    background: {c["surface2"]};
-    border: 1px solid {c["border"]};
-    border-radius: 12px;
-    padding: 5px 12px;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    border-radius: 13px;
+    padding: 5px 14px;
     font-size: 9pt;
-    font-weight: 600;
+    font-weight: 700;
     letter-spacing: 0.5px;
+    color: {c["text"]};
 }}
 QLineEdit#searchBar {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
-    border-radius: 10px;
-    padding: 8px 14px;
+    border-radius: 12px;
+    padding: 9px 16px;
     font-size: 10pt;
     color: {c["text"]};
 }}
 QLineEdit#searchBar:focus {{
     border: 1px solid {c["accent"]};
+    background: {c["card"]};
 }}
 QPushButton#iconBtn {{
     background: transparent;
@@ -146,36 +168,40 @@ QFrame#channelCard {{
     border-radius: 14px;
 }}
 QFrame#channelCard:hover {{
-    background: #232938;
-    border: 1px solid {c["accent"]};
+    background: {c["card_hover"]};
+    border: 1px solid rgba(139, 92, 246, 0.65);
 }}
 QFrame#channelCard[selected="true"] {{
-    background: #252b3d;
+    background: #222b3e;
     border: 2px solid {c["accent"]};
 }}
 QWidget#logoWrap {{
     background: {c["surface"]};
+    border: 1px solid rgba(255, 255, 255, 0.04);
     border-radius: 10px;
 }}
 QLabel#liveBadge {{
-    background: {c["red"]};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #ef4444, stop:1 #dc2626);
     color: white;
+    border-radius: 5px;
+    padding: 2px 8px;
+    font-size: 8pt;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+}}
+QLabel#qualityBadge {{
+    background: rgba(6, 182, 212, 0.18);
+    color: #38bdf8;
+    border: 1px solid rgba(6, 182, 212, 0.45);
     border-radius: 5px;
     padding: 2px 7px;
     font-size: 8pt;
     font-weight: 800;
-}}
-QLabel#qualityBadge {{
-    background: rgba(0, 0, 0, 120);
-    color: {c["text"]};
-    border: 1px solid {c["border"]};
-    border-radius: 5px;
-    padding: 2px 6px;
-    font-size: 8pt;
-    font-weight: 700;
+    letter-spacing: 0.5px;
 }}
 QLabel#lockBadge {{
-    background: rgba(10, 12, 20, 180);
+    background: rgba(9, 11, 16, 210);
     border: 1px solid {c["border"]};
     border-radius: 12px;
 }}
@@ -215,8 +241,8 @@ QFrame#posterCard {{
     border-radius: 14px;
 }}
 QFrame#posterCard:hover {{
-    background: #232938;
-    border: 1px solid {c["accent"]};
+    background: {c["card_hover"]};
+    border: 1px solid rgba(139, 92, 246, 0.65);
 }}
 QProgressBar#miniProgress {{
     background: {c["surface"]};
@@ -231,75 +257,84 @@ QProgressBar#miniProgress::chunk {{
 }}
 
 QFrame#heroCard {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #191423, stop:0.55 #141821, stop:1 #141821);
-    border: 1px solid {c["border"]};
-    border-radius: 16px;
+    background: {HERO_GRADIENT};
+    border: 1px solid #2d264a;
+    border-radius: 18px;
 }}
 QLabel#heroTitle {{
-    font-size: 20pt;
+    font-size: 21pt;
     font-weight: 800;
+    color: #ffffff;
+    letter-spacing: -0.3px;
 }}
 QLabel#heroKicker {{
-    font-size: 9pt;
-    color: {c["muted"]};
-    letter-spacing: 1px;
-    font-weight: 600;
+    font-size: 8.5pt;
+    color: {c["accent_light"]};
+    letter-spacing: 1.5px;
+    font-weight: 700;
 }}
 
 /* ================= buttons ================= */
 QPushButton#primaryBtn {{
     background: {GRADIENT};
     color: white;
-    border: none;
+    border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 10px;
     padding: 10px 22px;
     font-weight: 700;
-    font-size: 10pt;
+    font-size: 9.5pt;
 }}
 QPushButton#primaryBtn:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #9d71f7, stop:1 #7c3aed);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #9d71f7, stop:0.6 #8b5cf6, stop:1 #7c3aed);
+    border-color: rgba(255, 255, 255, 0.25);
 }}
 QPushButton#primaryBtn:disabled {{
     background: {c["surface2"]};
     color: {c["muted"]};
+    border-color: transparent;
 }}
 QPushButton#outlineBtn {{
-    background: transparent;
+    background: rgba(255, 255, 255, 0.03);
     color: {c["text"]};
     border: 1px solid {c["border"]};
     border-radius: 10px;
     padding: 9px 20px;
-    font-size: 10pt;
+    font-size: 9.5pt;
+    font-weight: 600;
 }}
 QPushButton#outlineBtn:hover {{
+    background: rgba(139, 92, 246, 0.1);
     border-color: {c["accent"]};
+    color: white;
 }}
 QPushButton#dangerBtn {{
-    background: transparent;
+    background: rgba(239, 68, 68, 0.08);
     color: {c["red"]};
-    border: 1px solid {c["red"]};
+    border: 1px solid rgba(239, 68, 68, 0.6);
     border-radius: 10px;
     padding: 9px 20px;
-    font-size: 10pt;
+    font-size: 9.5pt;
+    font-weight: 600;
 }}
 QPushButton#dangerBtn:hover {{
     background: {c["red"]};
     color: white;
+    border-color: {c["red"]};
 }}
 /* provider switcher button (sidebar) */
 QPushButton#providerBtn {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
     border-radius: 10px;
-    padding: 8px 10px;
+    padding: 8px 12px;
     font-size: 9pt;
     text-align: left;
     color: {c["text"]};
 }}
 QPushButton#providerBtn:hover {{
     border-color: {c["accent"]};
+    background: {c["card"]};
 }}
 /* login screen */
 QWidget#loginOverlay {{
@@ -334,7 +369,7 @@ QLabel#loginError {{
 }}
 /* inactive-account banner */
 QFrame#accountBanner {{
-    background: #2a1418;
+    background: rgba(239, 68, 68, 0.12);
     border: 1px solid {c["red"]};
     border-radius: 10px;
     margin: 8px 16px 0px 16px;
@@ -345,13 +380,14 @@ QLabel#dlgTitle {{
     font-weight: 700;
 }}
 QLabel#goldLabel {{
-    color: #fbbf24;
+    color: {c["gold"]};
     font-weight: 700;
     font-size: 11pt;
 }}
 QLabel#plotLabel {{
     color: {c["text"]};
     font-size: 10pt;
+    line-height: 1.4;
 }}
 QPushButton#ctlBtn {{
     background: {c["surface2"]};
@@ -362,15 +398,17 @@ QPushButton#ctlBtn {{
 }}
 QPushButton#ctlBtn:hover {{
     border-color: {c["accent"]};
+    background: {c["card_hover"]};
 }}
 QPushButton#transportBtn {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
-    border-radius: 18px;
+    border-radius: 19px;
     padding: 8px;
 }}
 QPushButton#transportBtn:hover {{
     border-color: {c["accent"]};
+    background: {c["card_hover"]};
 }}
 
 /* ================= sections / lists ================= */
@@ -381,20 +419,22 @@ QLabel#sectionTitle {{
 QPushButton#viewAllBtn {{
     background: transparent;
     border: none;
-    color: {c["accent"]};
+    color: {c["accent_light"]};
     font-size: 10pt;
     font-weight: 600;
 }}
 QPushButton#viewAllBtn:hover {{
-    text-decoration: underline;
+    color: white;
 }}
 QLabel#pageTitle {{
-    font-size: 16pt;
+    font-size: 17pt;
     font-weight: 800;
+    letter-spacing: -0.2px;
 }}
 QLabel#greeting {{
-    font-size: 20pt;
+    font-size: 21pt;
     font-weight: 800;
+    letter-spacing: -0.3px;
 }}
 QLabel#greetingSub {{
     font-size: 11pt;
@@ -408,6 +448,7 @@ QLabel#dateLabel {{
 /* ================= right panel ================= */
 QWidget#rightPanel {{
     background: {c["surface"]};
+    border-left: 1px solid {c["border"]};
 }}
 QFrame#sideCard {{
     background: {c["card"]};
@@ -453,6 +494,7 @@ QLabel#thumbPlaceholder {{
 /* ================= status bar ================= */
 QWidget#statusbar {{
     background: {c["surface"]};
+    border-top: 1px solid {c["border"]};
 }}
 QLabel#statusText {{
     font-size: 9pt;
@@ -466,29 +508,42 @@ QLabel#statusDot {{
 QComboBox {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
-    border-radius: 8px;
-    padding: 7px 10px;
+    border-radius: 9px;
+    padding: 7px 12px;
     min-width: 140px;
+    color: {c["text"]};
+}}
+QComboBox:hover {{
+    border-color: {c["accent"]};
 }}
 QComboBox QAbstractItemView {{
     background: {c["card"]};
     border: 1px solid {c["border"]};
-    selection-background-color: rgba(139, 92, 246, 40);
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: rgba(139, 92, 246, 0.4);
+    selection-color: white;
 }}
 QSlider::groove:horizontal {{
-    height: 6px;
-    background: {c["surface"]};
-    border-radius: 3px;
+    height: 4px;
+    background: {c["surface2"]};
+    border-radius: 2px;
 }}
 QSlider::handle:horizontal {{
-    width: 14px; height: 14px;
-    margin: -4px 0;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
     border-radius: 7px;
-    background: {c["accent"]};
+    background: #ffffff;
+    border: 2px solid {c["accent"]};
+}}
+QSlider::handle:horizontal:hover {{
+    background: {c["accent_light"]};
+    border: 2px solid #ffffff;
 }}
 QSlider::sub-page:horizontal {{
-    background: {c["accent"]};
-    border-radius: 3px;
+    background: {GRADIENT};
+    border-radius: 2px;
 }}
 QSlider#npSlider::groove:horizontal {{
     height: 4px;
@@ -496,32 +551,56 @@ QSlider#npSlider::groove:horizontal {{
     border-radius: 2px;
 }}
 QSlider#npSlider::handle:horizontal {{
-    width: 12px; height: 12px;
+    width: 12px;
+    height: 12px;
     margin: -4px 0;
     border-radius: 6px;
-    background: {c["accent"]};
+    background: #ffffff;
+    border: 2px solid {c["accent"]};
 }}
 QSlider#npSlider::sub-page:horizontal {{
-    background: {c["accent"]};
+    background: {GRADIENT};
     border-radius: 2px;
 }}
 QScrollBar:vertical {{
     background: transparent;
-    width: 10px;
+    width: 7px;
+    margin: 3px 1px 3px 1px;
 }}
 QScrollBar::handle:vertical {{
-    background: {c["border"]};
-    border-radius: 5px;
-    min-height: 30px;
+    background: rgba(148, 163, 184, 0.25);
+    border-radius: 3px;
+    min-height: 36px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: rgba(139, 92, 246, 0.7);
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+    background: none;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
 }}
 QScrollBar:horizontal {{
     background: transparent;
-    height: 10px;
+    height: 7px;
+    margin: 1px 3px 1px 3px;
 }}
 QScrollBar::handle:horizontal {{
-    background: {c["border"]};
-    border-radius: 5px;
-    min-width: 30px;
+    background: rgba(148, 163, 184, 0.25);
+    border-radius: 3px;
+    min-width: 36px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: rgba(139, 92, 246, 0.7);
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0px;
+    background: none;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none;
 }}
 QTabWidget::pane {{ border: none; }}
 QTabBar::tab {{
@@ -533,7 +612,8 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{
     background: {c["card"]};
-    color: {c["accent"]};
+    color: {c["accent_light"]};
+    font-weight: 600;
 }}
 QDialog {{
     background: {c["surface"]};
@@ -548,7 +628,7 @@ QDialog#shortcutsDialog {{
 }}
 QLabel#keyBadge {{
     background: {c["card"]};
-    color: {c["accent"]};
+    color: {c["accent_light"]};
     border: 1px solid #313847;
     border-radius: 6px;
     padding: 3px 10px;
@@ -564,8 +644,8 @@ QLabel#keyDesc {{
 QLineEdit, QSpinBox {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
-    border-radius: 8px;
-    padding: 7px 10px;
+    border-radius: 9px;
+    padding: 8px 12px;
     selection-background-color: {c["accent"]};
 }}
 QLineEdit:focus, QSpinBox:focus {{
@@ -580,12 +660,12 @@ QListWidget::item {{
     padding: 6px;
 }}
 QListWidget::item:selected {{
-    background: rgba(139, 92, 246, 40);
+    background: rgba(139, 92, 246, 0.35);
     border-radius: 6px;
 }}
 QMenu {{
     background: {c["card"]};
-    border: 1px solid {c["border"]};
+    border: 1px solid rgba(139, 92, 246, 0.25);
     border-radius: 10px;
     padding: 6px;
 }}
@@ -609,7 +689,7 @@ QCheckBox {{
 
 /* ================= responsive / overlay ================= */
 QWidget#scrim {{
-    background: rgba(4, 6, 10, 150);
+    background: rgba(4, 6, 10, 165);
 }}
 QWidget#drawerPanel {{
     background: {c["surface"]};
@@ -618,13 +698,13 @@ QWidget#drawerPanel {{
 QPushButton#fabBtn {{
     background: {GRADIENT};
     color: white;
-    border: none;
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 28px;
     font-weight: 700;
 }}
 QPushButton#fabBtn:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #9d71f7, stop:1 #7c3aed);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #9d71f7, stop:0.6 #8b5cf6, stop:1 #7c3aed);
 }}
 QPushButton#fabBtn:pressed {{
     background: {c["accent2"]};
@@ -673,6 +753,7 @@ QPushButton#transportBtn:pressed {{
     background: {c["surface"]};
 }}
 """
+
 
 
 def apply_theme(app) -> None:

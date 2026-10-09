@@ -82,11 +82,16 @@ class SettingsDialog(QDialog):
     SHORTCUTS = [
         ("Space", "Play / pause"),
         ("F", "Fullscreen"),
+        ("P", "Picture-in-Picture"),
+        ("A", "Aspect ratio"),
+        ("C / S", "Audio & Subtitle tracks"),
+        ("E", "External player"),
         ("M", "Mute / unmute"),
         ("Left / Right", "Previous / next channel"),
-        ("/", "Focus search"),
+        ("Ctrl+K / /", "Quick spotlight search"),
         ("Esc", "Close panel or dialog"),
     ]
+
 
     def __init__(self, config, parent=None, parental=None, groups=None) -> None:
         super().__init__(parent)
@@ -395,9 +400,10 @@ class ShortcutsDialog(QDialog):
             ("M", "Mute / Unmute audio"),
             ("↑ / ↓", "Volume up / down (±5%)"),
             ("← / →", "Prev / Next channel (or Seek ±10s in VOD)"),
-            ("/", "Focus search bar"),
+            ("Ctrl+K / /", "Quick spotlight search"),
             ("Esc", "Exit Fullscreen / Close drawer / Cancel"),
             ("? / F1", "Show this shortcuts help dialog"),
+
         ]
 
         for row, (key_label, desc) in enumerate(shortcuts):

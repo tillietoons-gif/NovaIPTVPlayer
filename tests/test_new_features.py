@@ -16,7 +16,9 @@ from app.models import Channel
 from app.player import Player
 from app.xtream import XtreamClient
 from ui.main_window import _AutoPlayNextBanner, _PipWindow
-from ui.widgets import VideoWidget, make_icon
+from ui.theme import build_stylesheet, COLORS
+from ui.widgets import VideoWidget, make_icon, AudioVisualizer, HeroCard, quality_of
+
 
 
 class TestNewFeatures(unittest.TestCase):
@@ -141,3 +143,46 @@ class TestNewFeatures(unittest.TestCase):
         for icon_name in ("aspect", "pip", "subtitle", "cc", "calendar", "epg", "external", "launch"):
             icon = make_icon(icon_name, 24, "white")
             self.assertFalse(icon.isNull())
+
+    def test_audio_visualizer_widget(self) -> None:
+        vis = AudioVisualizer(bar_count=4)
+        self.assertFalse(vis._active)
+        vis.set_active(True)
+        self.assertTrue(vis._active)
+        vis._tick()
+        # Ensure grab executes paintEvent cleanly
+        pm = vis.grab()
+        self.assertFalse(pm.isNull())
+        vis.stop()
+        self.assertFalse(vis._active)
+
+    def test_quality_of_classification(self) -> None:
+        ch_4k = Channel(name="Sky Sports UHD 4K", url="http://test/4k")
+        ch_fhd = Channel(name="BBC One FHD 1080p", url="http://test/fhd")
+        ch_hd = Channel(name="Discovery Channel", url="http://test/hd")
+        self.assertEqual(quality_of(ch_4k), "4K")
+        self.assertEqual(quality_of(ch_fhd), "FHD")
+        self.assertEqual(quality_of(ch_hd), "HD")
+
+    def test_hero_card_tags_and_feature(self) -> None:
+        hero = HeroCard()
+        hero.set_feature(None)
+        self.assertFalse(hero.watch_btn.isEnabled())
+
+        ch = Channel(name="Canal+ 4K Cinema", url="http://test/canal", kind="live", group="Movies")
+
+        hero.set_feature(ch)
+        self.assertTrue(hero.watch_btn.isEnabled())
+        self.assertFalse(hero.quality_tag.isHidden())
+
+        self.assertIn("4K ULTRA HD", hero.quality_tag.text())
+        self.assertEqual(hero.title.text(), "Canal+ 4K Cinema")
+
+    def test_luxury_theme_tokens_and_stylesheet(self) -> None:
+        self.assertIn("card_hover", COLORS)
+        self.assertIn("cyan", COLORS)
+        qss = build_stylesheet()
+        self.assertIn("#090b10", qss)
+        self.assertIn("#8b5cf6", qss)
+        self.assertIn("channelCard", qss)
+
