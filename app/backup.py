@@ -36,7 +36,10 @@ def create_backup_data(
         }
         for e in history.all()
     ]
-    resume_data = {url: pt.to_dict() for url, pt in resume.all().items()}
+    resume_data = {
+        url: (pt if isinstance(pt, dict) else pt.to_dict())
+        for url, pt in resume.all().items()
+    }
     config_data = {
         "volume": config.volume,
         "default_aspect": config.default_aspect,
@@ -155,10 +158,12 @@ def import_backup(
     if "resume" in data and isinstance(data["resume"], dict):
         for url, pt_dict in data["resume"].items():
             try:
+                pos = float(pt_dict.get("position", pt_dict.get("pos_s", 0)))
+                dur = float(pt_dict.get("duration", pt_dict.get("dur_s", 0)))
                 resume.update(
                     url,
-                    pos_s=float(pt_dict.get("pos_s", 0)),
-                    dur_s=float(pt_dict.get("dur_s", 0)),
+                    pos_s=pos,
+                    dur_s=dur,
                     channel_name=pt_dict.get("channel_name", ""),
                 )
                 resume_restored += 1

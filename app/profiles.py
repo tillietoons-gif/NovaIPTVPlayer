@@ -57,6 +57,13 @@ class ProviderProfile:
             who = self.playlist_url
         return f"{self.name} [{self.kind}] {who}"
 
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ProviderProfile:
+        return cls(**{k: d.get(k, "") for k in cls.__dataclass_fields__ if k in d})
+
 
 class ProfileStore:
     """JSON-backed store of provider profiles + the active profile id."""
@@ -130,6 +137,13 @@ class ProfileStore:
                 self._save()
                 return
         raise KeyError(f"Unknown profile id: {profile.id}")
+
+    def save(self, profile: ProviderProfile) -> ProviderProfile:
+        """Insert or update a profile."""
+        if profile.id and self.get(profile.id) is not None:
+            self.update(profile)
+            return profile
+        return self.add(profile)
 
     def remove(self, profile_id: str) -> bool:
         before = len(self._profiles)

@@ -12,6 +12,7 @@ class Channel:
 
     name: str
     url: str
+    id: str = ""
     tvg_id: str = ""
     logo: str = ""
     group: str = ""
@@ -39,12 +40,63 @@ class Channel:
     def display_group(self) -> str:
         return self.group or "Uncategorized"
 
-    def build_catchup_url(self, client, program: EPGProgram) -> str | None:
-        """Construct catchup archive playback URL for this channel and program."""
-        if not self.catchup or not self.stream_id or client is None:
-            return None
-        dur_mins = max(1, int((program.stop - program.start).total_seconds() // 60))
-        return client.timeshift_url(self.stream_id, program.start, dur_mins)
+    def build_catchup_url(self, start_or_client=None, duration_or_program=60, duration_minutes: int = 60) -> str | None:
+        """Construct catchup archive playback URL for M3U and Xtream channels.
+
+        Can be called as:
+          channel.build_catchup_url(start_dt, duration_minutes=60)
+          channel.build_catchup_url(xtream_client, epg_program)
+        """
+        if isinstance(start_or_client, datetime):
+            start_dt = start_or_client
+            dur_mins = duration_minutes if duration_minutes != 60 else (
+                duration_or_program if isinstance(duration_or_program, int) else 60
+            )
+
+            start_utc = int(start_dt.timestamp())
+            now_utc = int(datetime.now().timestamp())
+            offset = max(0, now_utc - start_utc)
+            dur_secs = max(1, dur_mins * 60)
+
+            src = self.catchup_source or ""
+            if src:
+                res = src.replace("${start}", str(start_utc))
+                res = res.replace("${timestamp}", str(now_utc))
+                res = res.replace("${offset}", str(offset))
+                res = res.replace("${duration}", str(dur_secs))
+                res = res.replace("${lutc}", str(now_utc))
+                res = res.replace("${utc}", str(start_utc))
+                res = res.replace("${utcend}", str(start_utc + dur_secs))
+                res = res.replace("${Y}", start_dt.strftime("%Y"))
+                res = res.replace("${m}", start_dt.strftime("%m"))
+                res = res.replace("${d}", start_dt.strftime("%d"))
+                res = res.replace("${H}", start_dt.strftime("%H"))
+                res = res.replace("${M}", start_dt.strftime("%M"))
+                res = res.replace("${S}", start_dt.strftime("%S"))
+                if src.startswith("?") or src.startswith("&"):
+                    sep = "&" if "?" in self.url else "?"
+                    clean_res = res.lstrip("?").lstrip("&")
+                    return f"{self.url}{sep}{clean_res}"
+                return res
+
+            mode = str(self.catchup or "").lower()
+            if mode in ("flussonic", "shift"):
+                base = self.url.rstrip("/")
+                if "tracks-v1a1/mono.m3u8" in base:
+                    return base.replace("tracks-v1a1/mono.m3u8", f"timeshift_rel-{offset}.m3u8")
+                return f"{base}/timeshift_rel-{offset}.m3u8"
+            else:
+                sep = "&" if "?" in self.url else "?"
+                return f"{self.url}{sep}utc={start_utc}&lutc={now_utc}"
+
+        # Xtream client + EPGProgram calling pattern
+        client = start_or_client
+        program = duration_or_program
+        if client is not None and getattr(self, "stream_id", None) and hasattr(program, "start"):
+            dur_mins = max(1, int((program.stop - program.start).total_seconds() // 60))
+            return client.timeshift_url(self.stream_id, program.start, dur_mins)
+
+        return None
 
 
 @dataclass

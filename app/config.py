@@ -11,8 +11,8 @@ class AppConfig:
     """Thin typed wrapper around QSettings so the rest of the app never
     touches raw string keys."""
 
-    def __init__(self) -> None:
-        self._s = QSettings(__app_name__, __app_name__)
+    def __init__(self, settings: QSettings | None = None) -> None:
+        self._s = settings if settings is not None else QSettings(__app_name__, __app_name__)
 
     # -- playlist ---------------------------------------------------------
     @property

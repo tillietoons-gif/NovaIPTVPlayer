@@ -82,6 +82,10 @@ class HistoryStore:
         self._entries = self._entries[:_MAX_HISTORY]
         self.save()
 
+    def record(self, channel_url: str, channel_name: str = "") -> None:
+        """Alias for add(channel_name, channel_url)."""
+        self.add(channel_name, channel_url)
+
     def clear(self) -> None:
         self._entries = []
         self.save()

@@ -72,6 +72,14 @@ class ResumeStore:
         except (TypeError, ValueError):
             return None
 
+    def all(self) -> dict[str, dict]:
+        """Return a copy of all active resume points."""
+        return dict(self._data)
+
+    def update(self, url: str, pos_s: float, dur_s: float, channel_name: str = "") -> None:
+        """Insert or update a resume playback timestamp."""
+        self.save(url, pos_s, dur_s)
+
     def clear(self, url: str) -> None:
         if url in self._data:
             del self._data[url]

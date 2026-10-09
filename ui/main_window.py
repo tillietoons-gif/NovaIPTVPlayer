@@ -45,6 +45,7 @@ from app.resume import ResumeStore
 from app.xtream import XtreamClient, XtreamError
 from ui.dialogs import AddPlaylistDialog, SettingsDialog, PinDialog, ShortcutsDialog
 from ui.login import LoginScreen
+from ui.multiview import MultiViewGrid
 from ui.theme import COLORS, animations_enabled
 from ui.widgets import (
     ChannelGrid, SearchBar, VideoWidget, NavButton, IconButton, WinButton,
@@ -1264,6 +1265,16 @@ class _FullscreenVideo(QDialog):
             self._on_vol_changed(v)
         elif key == Qt.Key_M:
             self._on_mute()
+        elif key == Qt.Key_BracketLeft:
+            self.main._adjust_subtitle_offset(-250)
+            off = self.main.player.subtitle_offset_ms
+            sign = "+" if off > 0 else ""
+            self.toast.show_toast(f"Subtitle Delay: {sign}{off} ms")
+        elif key == Qt.Key_BracketRight:
+            self.main._adjust_subtitle_offset(+250)
+            off = self.main.player.subtitle_offset_ms
+            sign = "+" if off > 0 else ""
+            self.toast.show_toast(f"Subtitle Delay: {sign}{off} ms")
         else:
             super().keyPressEvent(event)
 
@@ -1384,7 +1395,8 @@ class _DetailsDialog(QDialog):
                  parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(channel.name)
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(440)
+        self.catchup_selected = False
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         logo = LogoLabel(72)
@@ -1397,6 +1409,7 @@ class _DetailsDialog(QDialog):
         info.addWidget(QLabel(f"{channel.display_group}  •  {channel.kind.title()}"))
         top.addLayout(info, 1)
         lay.addLayout(top)
+
         if now:
             lay.addWidget(QLabel(
                 f"Now: {now.title} ({now.start.strftime('%H:%M')}–"
@@ -1404,14 +1417,38 @@ class _DetailsDialog(QDialog):
         if nxt:
             lay.addWidget(QLabel(
                 f"Next: {nxt.title} ({nxt.start.strftime('%H:%M')})"))
+
+        has_catchup = bool(
+            channel.catchup
+            or (parent and getattr(parent, "_xtream", None) and getattr(channel, "stream_id", None))
+        )
+        if has_catchup:
+            days = channel.catchup_days or 3
+            cup_lbl = QLabel(f"⏪ Catch-Up Available ({days} days archive window)")
+            cup_lbl.setStyleSheet(f"color: {COLORS['green']}; font-weight: 600; font-size: 11px;")
+            lay.addWidget(cup_lbl)
+
         lay.addWidget(QLabel(f"Stream URL: {channel.url}"))
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        watch = QPushButton("Watch")
+
+        if has_catchup and now:
+            replay_btn = QPushButton("  Replay (Catch-Up)")
+            replay_btn.setIcon(make_icon("replay", 14, COLORS["accent"]))
+            replay_btn.setObjectName("outlineBtn")
+            replay_btn.setCursor(Qt.PointingHandCursor)
+            replay_btn.clicked.connect(self._on_replay)
+            buttons.addButton(replay_btn, QDialogButtonBox.ActionRole)
+
+        watch = QPushButton("Watch Live")
         watch.setObjectName("primaryBtn")
         watch.clicked.connect(self.accept)
         buttons.addButton(watch, QDialogButtonBox.AcceptRole)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+
+    def _on_replay(self) -> None:
+        self.catchup_selected = True
+        self.accept()
 
 
 def _trailer_url(raw: str) -> str:
@@ -1585,6 +1622,7 @@ NAV_ITEMS = [
     ("home", "Home", "home"),
     ("live", "Live TV", "tv"),
     ("guide", "TV Guide", "calendar"),
+    ("multiview", "Multi-View", "grid"),
     ("movie", "Movies", "film"),
     ("series", "TV Series", "layers"),
     ("catchup", "Catch-up", "replay"),
@@ -2109,6 +2147,8 @@ class MainWindow(QMainWindow):
         """Unload everything (profile switch / provider removal)."""
         self._save_resume_point()
         self.player.stop()
+        if hasattr(self, "multiview_grid"):
+            self.multiview_grid.stop_all()
         self.channels = []
         self.epg = EPGManager()
         self._xtream = None
@@ -2376,7 +2416,12 @@ class MainWindow(QMainWindow):
             self.vol.setValue(v)
             self._flash_status(f"Volume: {v}%", 1500)
         elif key == Qt.Key_BracketLeft:
-            self._toggle_sidebar_compact()
+            if mods & Qt.ControlModifier:
+                self._toggle_sidebar_compact()
+            else:
+                self._adjust_subtitle_offset(-250)
+        elif key == Qt.Key_BracketRight:
+            self._adjust_subtitle_offset(+250)
         elif key == Qt.Key_Z:
             self._open_quick_zapper()
         elif key == Qt.Key_I:
@@ -2403,6 +2448,8 @@ class MainWindow(QMainWindow):
             return self._build_grid_page(key)
         if key == "guide":
             return self._build_guide_page()
+        if key == "multiview":
+            return self._build_multiview_page()
         if key == "catchup":
             return self._build_catchup_page()
         if key == "favorites":
@@ -2415,6 +2462,22 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(page)
         lay.addWidget(QLabel("Unknown page"))
         return page
+
+    # -- multiview sports grid ------------------------------------------------
+    def _build_multiview_page(self) -> QWidget:
+        self.multiview_grid = MultiViewGrid(self)
+        self.multiview_grid.channel_selected.connect(self._on_multiview_pick_channel)
+        self.multiview_grid.status_message.connect(lambda msg: self._flash_status(msg, 3000))
+        return self.multiview_grid
+
+    def _on_multiview_pick_channel(self, tile) -> None:
+        channels = self._live_channels()
+        if not channels:
+            self._flash_status("No live channels loaded", 2500)
+            return
+        zapper = QuickZapperOverlay(channels, self)
+        zapper.channel_selected.connect(lambda ch: (tile.play_channel(ch), zapper.close()))
+        zapper.exec()
 
     # -- series browser (grid -> detail -> episodes) --------------------------
     def _build_series_page(self) -> QWidget:
@@ -3083,9 +3146,13 @@ class MainWindow(QMainWindow):
                         """)
 
                     p_btn.setToolTip(f"{pr.title}\n{time_txt}\n\n{pr.desc or 'No synopsis'}")
+                    has_catchup = bool(
+                        (self._xtream and self._profile and self._profile.is_xtream() and getattr(ch, "stream_id", None))
+                        or ch.catchup
+                    )
                     if is_current:
                         p_btn.clicked.connect(lambda _=False, c=ch: self.play_channel(c, self._live_channels()))
-                    elif is_past and self._xtream and self._profile and self._profile.is_xtream() and getattr(ch, "stream_id", None):
+                    elif is_past and has_catchup:
                         p_btn.clicked.connect(partial(self._play_timeshift, ch, pr))
                     else:
                         p_btn.clicked.connect(partial(self._show_program_dialog, ch, pr))
@@ -3133,9 +3200,19 @@ class MainWindow(QMainWindow):
         desc.setStyleSheet(f"color: {COLORS['text']}; font-size: 10pt; line-height: 1.4;")
         lay.addWidget(desc)
 
+        now_utc = datetime.now(timezone.utc)
+        is_past = program.stop <= now_utc
+        has_catchup = bool(
+            channel.catchup
+            or (self._xtream and getattr(channel, "stream_id", None))
+        )
         buttons = QDialogButtonBox()
+        if is_past and has_catchup:
+            replay_btn = buttons.addButton("⏪ Replay (Catch-Up)", QDialogButtonBox.AcceptRole)
+            replay_btn.setStyleSheet(f"background: {COLORS['accent']}; color: white; border-radius: 4px; padding: 6px 14px;")
+            replay_btn.clicked.connect(lambda: (dlg.accept(), self._play_timeshift(channel, program)))
         watch_btn = buttons.addButton("Watch Live Now", QDialogButtonBox.ActionRole)
-        watch_btn.setStyleSheet(f"background: {COLORS['accent']}; color: white; border-radius: 4px; padding: 6px 14px;")
+        watch_btn.setStyleSheet(f"background: {COLORS['surface2']}; color: white; border-radius: 4px; padding: 6px 14px;")
         watch_btn.clicked.connect(lambda: (dlg.accept(), self.play_channel(channel, self._live_channels())))
         close_btn = buttons.addButton(QDialogButtonBox.Close)
         close_btn.clicked.connect(dlg.reject)
@@ -3520,6 +3597,8 @@ class MainWindow(QMainWindow):
         self.player.recording_stopped.connect(self._on_rec_stopped)
         self.player.recording_error.connect(self._on_rec_error)
         self.player.playback_finished.connect(self._on_playback_finished)
+        self.player.set_hw_acceleration(getattr(self.config, "hw_acceleration", "auto"))
+        self.player.set_audio_boost(getattr(self.config, "audio_boost", "off"))
         self.player.set_mute(self.config.muted)
         self.player.set_volume(self.config.volume)
         self.player.attach(self.thumb_video)
@@ -4198,8 +4277,9 @@ class MainWindow(QMainWindow):
                 self._xtream and self._profile and self._profile.is_xtream()
                 and getattr(ch, "stream_id", None)
             )
+            has_catchup = is_past and (is_xtream_catchup or ch.catchup)
 
-            if is_past and is_xtream_catchup:
+            if has_catchup:
                 watch = QPushButton("  Replay (Catch-up)")
                 watch.setIcon(make_icon("replay", 14, COLORS["accent"]))
                 watch.setObjectName("primaryBtn")
@@ -4217,13 +4297,18 @@ class MainWindow(QMainWindow):
         self.catchup_lay.addStretch(1)
 
     def _play_timeshift(self, channel: Channel, program: EPGProgram) -> None:
-        if not self._xtream or not getattr(channel, "stream_id", None):
+        duration_min = max(1, int((program.stop - program.start).total_seconds() / 60))
+        url = None
+        if self._xtream and getattr(channel, "stream_id", None):
+            url = self._xtream.timeshift_url(channel.stream_id, program.start, duration_min)
+        elif channel.catchup:
+            url = channel.build_catchup_url(program.start, duration_min)
+
+        if not url:
             self._flash_status("Catch-up replay is not supported for this channel", 3000)
             return
-        duration_min = max(1, int((program.stop - program.start).total_seconds() / 60))
-        url = self._xtream.timeshift_url(channel.stream_id, program.start, duration_min)
         replay_channel = Channel(
-            id=f"catchup_{channel.stream_id}_{int(program.start.timestamp())}",
+            id=f"catchup_{channel.id or channel.name}_{int(program.start.timestamp())}",
             name=f"{channel.name} — {program.title} (Catch-up)",
             url=url,
             kind="movie",
@@ -4538,6 +4623,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "aspect_btn"):
             self.aspect_btn.setToolTip(f"Aspect Ratio: {nxt.upper()} (A)")
         self._flash_status(f"Aspect Ratio: {nxt.upper()}", 2000)
+
+    def _adjust_subtitle_offset(self, delta_ms: int) -> None:
+        new_val = self.player.subtitle_offset_ms + delta_ms
+        self.player.set_subtitle_offset(new_val)
+        sign = "+" if new_val > 0 else ""
+        self._flash_status(f"Subtitle Sync Offset: {sign}{new_val} ms", 2500)
 
     def _show_tracks_menu(self) -> None:
         menu = QMenu(self)
@@ -4986,11 +5077,19 @@ class MainWindow(QMainWindow):
         groups = sorted({c.display_group for c in self.channels
                          if c.display_group})
         dlg = SettingsDialog(self.config, self,
-                             parental=self.parental, groups=groups)
+                             parental=self.parental, groups=groups,
+                             profiles=self.profiles, favorites=self.favorites,
+                             history=self.history, resume=self.resume)
         if dlg.exec():
             self.vol.setValue(self.config.volume)
             if self.config.muted != self._muted:
                 self._toggle_mute()
+            self.player.set_hw_acceleration(getattr(self.config, "hw_acceleration", "auto"))
+            self.player.set_audio_boost(getattr(self.config, "audio_boost", "off"))
+            self._flash_status(
+                f"Settings applied: GPU Accel ({self.config.hw_acceleration.upper()}) • Audio ({self.config.audio_boost.title()})",
+                3500,
+            )
         # PIN removal/change applies immediately, even on Cancel
         self._refresh_locks()
 
@@ -4999,13 +5098,18 @@ class MainWindow(QMainWindow):
                     if self.epg.loaded else (None, None))
         dlg = _DetailsDialog(channel, now, nxt, self)
         if dlg.exec():
-            self.play_channel(channel, self._live_channels())
+            if getattr(dlg, "catchup_selected", False) and now:
+                self._play_timeshift(channel, now)
+            else:
+                self.play_channel(channel, self._live_channels())
 
     # -- shutdown -----------------------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802
         if not self._confirm_stop_recording("exit"):
             event.ignore()
             return
+        if hasattr(self, "multiview_grid"):
+            self.multiview_grid.stop_all()
         self._save_resume_point()
         self.config.window_geometry = bytes(self.saveGeometry())
         self.config.sync()

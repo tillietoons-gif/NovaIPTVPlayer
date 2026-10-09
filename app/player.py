@@ -60,7 +60,7 @@ _AUDIO_CHANNELS = 2
 _AUDIO_CHUNK = 8192  # bytes per QIODevice write
 
 
-def _open_options(url: str, stream_headers: dict[str, str], hw_accel: str = "auto") -> dict[str, str]:
+def _open_options(url: str, stream_headers: dict[str, str], hw_accel: str = "off") -> dict[str, str]:
     """Build FFmpeg options, including HTTP compatibility and hardware acceleration."""
     options = {"rw_timeout": _RW_TIMEOUT_US}
     if hw_accel and hw_accel != "off":
@@ -914,6 +914,7 @@ class Player(QObject):
             res["playback_speed"] = worker._playback_speed
             res["hw_acceleration"] = worker.hw_accel
             res["audio_boost"] = worker._audio_boost
+        res["hw_accel"] = res["hw_acceleration"]
         return res
 
     def set_speed(self, speed: float) -> None:
@@ -955,4 +956,8 @@ class Player(QObject):
 
     @property
     def subtitle_offset(self) -> int:
+        return self._subtitle_offset_ms
+
+    @property
+    def subtitle_offset_ms(self) -> int:
         return self._subtitle_offset_ms

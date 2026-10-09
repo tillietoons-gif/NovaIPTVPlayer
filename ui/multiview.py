@@ -194,11 +194,18 @@ class MultiViewTile(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    @property
+    def _audio_active(self) -> bool:
+        return self.is_audio_active
+
 
 class MultiViewGrid(QWidget):
     """Grid container managing dual, triple, or quad live stream views."""
 
-    def __init__(self, main_window: MainWindow, parent: QWidget | None = None) -> None:
+    channel_selected = Signal(object)
+    status_message = Signal(str)
+
+    def __init__(self, main_window: MainWindow | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.main = main_window
         self.current_layout = "quad"  # "dual", "triple", "quad"
@@ -331,8 +338,18 @@ class MultiViewGrid(QWidget):
 
     def _on_channel_change(self, tile: MultiViewTile) -> None:
         """Prompt user with quick channel picker to assign to this tile."""
+        self.channel_selected.emit(tile)
         if hasattr(self.main, "_open_quick_zapper_for_tile"):
             self.main._open_quick_zapper_for_tile(tile)
+
+    def set_layout(self, layout_name: str) -> None:
+        """Alias for switch_layout."""
+        self.switch_layout(layout_name)
+
+    def set_audio_focus(self, tile_index: int) -> None:
+        """Directly focus audio on tile at the given index."""
+        if 0 <= tile_index < len(self.tiles):
+            self._on_tile_focus(self.tiles[tile_index])
 
     def mute_all(self) -> None:
         for tile in self.tiles:

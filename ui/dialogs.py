@@ -91,28 +91,37 @@ class SettingsDialog(QDialog):
         ("P", "Picture-in-Picture"),
         ("A", "Aspect ratio"),
         ("C / S", "Audio & Subtitle tracks"),
+        ("[ / ]", "Subtitle sync offset (±250ms)"),
+        ("Z / Enter", "Quick Channel Zapper overlay"),
+        ("I", "Stream Diagnostics HUD (Stats for Nerds)"),
+        ("T", "Sleep Timer selector"),
+        ("0–9", "Direct channel number tuning"),
         ("E", "External player"),
         ("M", "Mute / unmute"),
         ("Left / Right", "Previous / next channel"),
         ("Ctrl+K / /", "Quick spotlight search"),
-        ("[", "Toggle sidebar collapse"),
         ("Esc", "Close panel or dialog"),
     ]
 
-
-
-    def __init__(self, config, parent=None, parental=None, groups=None) -> None:
+    def __init__(self, config, parent=None, parental=None, groups=None,
+                 profiles=None, favorites=None, history=None, resume=None) -> None:
         super().__init__(parent)
         self._config = config
         self._prefs = UiPrefs()
         self._parental = parental
         self._groups = sorted(groups or [])
+        self._profiles = profiles or getattr(parent, "profiles", None) or ProfileStore()
+        self._favorites = favorites or getattr(parent, "favorites", None) or FavoritesStore()
+        self._history = history or getattr(parent, "history", None) or HistoryStore()
+        self._resume = resume or getattr(parent, "resume", None) or ResumeStore()
+
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(440)
 
         lay = QVBoxLayout(self)
         form = QFormLayout()
 
+        # Playback & Audio
         self.volume_spin = QSpinBox()
         self.volume_spin.setRange(0, 125)
         self.volume_spin.setValue(config.volume)
@@ -122,6 +131,33 @@ class SettingsDialog(QDialog):
         self.mute_check.setChecked(config.muted)
         form.addRow(self.mute_check)
 
+        # Hardware Acceleration (GPU)
+        self.hw_combo = QComboBox()
+        self.hw_combo.addItem("Auto (Direct3D 11 / DXVA2 Fallback)", "auto")
+        self.hw_combo.addItem("Direct3D 11 (D3D11VA - Recommended)", "d3d11va")
+        self.hw_combo.addItem("DirectX Video Accel (DXVA2)", "dxva2")
+        self.hw_combo.addItem("NVIDIA NVDEC (CUDA)", "cuda")
+        self.hw_combo.addItem("Intel Quick Sync Video (QSV)", "qsv")
+        self.hw_combo.addItem("Software Decoding (Off)", "off")
+        cur_hw = getattr(config, "hw_acceleration", "auto")
+        hw_idx = self.hw_combo.findData(cur_hw)
+        if hw_idx >= 0:
+            self.hw_combo.setCurrentIndex(hw_idx)
+        self.hw_combo.setToolTip("GPU Hardware Acceleration enables smooth 4K 60fps playback with ultra-low CPU load.")
+        form.addRow("GPU Acceleration:", self.hw_combo)
+
+        # Audio Dialogue Boost / Dynamic Compressor
+        self.audio_combo = QComboBox()
+        self.audio_combo.addItem("Off (Original stream audio)", "off")
+        self.audio_combo.addItem("Dialogue Enhancer (Clear speech vocal lift)", "dialogue")
+        self.audio_combo.addItem("Night Mode (Dynamic compressor & quiet bass)", "night")
+        cur_ab = getattr(config, "audio_boost", "off")
+        ab_idx = self.audio_combo.findData(cur_ab)
+        if ab_idx >= 0:
+            self.audio_combo.setCurrentIndex(ab_idx)
+        self.audio_combo.setToolTip("DSP dynamic range compressor enhances speech intelligibility and limits sudden loud explosions.")
+        form.addRow("Audio Dialogue Boost:", self.audio_combo)
+
         self.anim_check = QCheckBox("Reduce animations")
         self.anim_check.setChecked(self._prefs.reduce_animations)
         self.anim_check.setToolTip(
@@ -129,6 +165,26 @@ class SettingsDialog(QDialog):
         form.addRow(self.anim_check)
 
         lay.addLayout(form)
+
+        # Backup & Restore Section
+        bk_title = QLabel("Backup & Restore (.novabackup)")
+        bk_title.setStyleSheet("font-weight:700; margin-top:8px;")
+        lay.addWidget(bk_title)
+
+        bk_desc = QLabel("Export or restore all provider accounts, playlists, favorites, and playback settings.")
+        bk_desc.setStyleSheet("color:#8b91a7; font-size:11px;")
+        bk_desc.setWordWrap(True)
+        lay.addWidget(bk_desc)
+
+        bk_row = QHBoxLayout()
+        bk_row.setSpacing(10)
+        export_btn = QPushButton("  Export Backup (.novabackup)…")
+        export_btn.clicked.connect(self._export_backup)
+        bk_row.addWidget(export_btn)
+        import_btn = QPushButton("  Restore from Backup…")
+        import_btn.clicked.connect(self._import_backup)
+        bk_row.addWidget(import_btn)
+        lay.addLayout(bk_row)
 
         if self._parental is not None:
             pc_title = QLabel("Parental Controls")
@@ -155,8 +211,8 @@ class SettingsDialog(QDialog):
         lay.addLayout(sc_form)
 
         note = QLabel(
-            "Tip: playback uses the built-in engine (bundled FFmpeg via PyAV)\n"
-            "— nothing extra to install for video and audio."
+            "Tip: playback uses the built-in hardware accelerated engine\n"
+            "— D3D11 / DXVA2 GPU decoders ensure stutter-free 4K streaming."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#8b95a9; font-size:11px;")
@@ -166,6 +222,68 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+
+    def _export_backup(self) -> None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"NovaIPTV_Backup_{stamp}.novabackup"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Backup", str(Path.home() / default_name),
+            "Nova Backup (*.novabackup);;JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            saved = export_backup(
+                path, self._config, self._profiles, self._favorites,
+                self._history, self._resume
+            )
+            QMessageBox.information(
+                self, "Backup Exported",
+                f"Backup successfully saved to:\n{saved.name}\n\n"
+                "Includes all provider profiles, favorites, history, and settings.",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", f"Could not create backup:\n{exc}")
+
+    def _import_backup(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Restore Backup", str(Path.home()),
+            "Nova Backup (*.novabackup *.json);;All Files (*)",
+        )
+        if not path:
+            return
+        answer = QMessageBox.question(
+            self, "Restore Backup",
+            "Restoring a backup will merge and update your profiles, favorites, "
+            "and playback preferences.\n\nDo you want to continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            res = import_backup(
+                path, self._config, self._profiles, self._favorites,
+                self._history, self._resume
+            )
+            self.volume_spin.setValue(self._config.volume)
+            self.mute_check.setChecked(self._config.muted)
+            hw_idx = self.hw_combo.findData(self._config.hw_acceleration)
+            if hw_idx >= 0:
+                self.hw_combo.setCurrentIndex(hw_idx)
+            ab_idx = self.audio_combo.findData(self._config.audio_boost)
+            if ab_idx >= 0:
+                self.audio_combo.setCurrentIndex(ab_idx)
+
+            QMessageBox.information(
+                self, "Backup Restored",
+                f"Backup successfully restored!\n\n"
+                f"• Profiles imported: {res.get('profiles', 0)}\n"
+                f"• Favorites restored: {res.get('favorites', 0)}\n"
+                f"• History records: {res.get('history', 0)}\n"
+                f"• Resume points: {res.get('resume', 0)}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Restore Failed", f"Could not restore backup:\n{exc}")
 
     # -- parental controls ------------------------------------------------------
     @staticmethod
@@ -278,6 +396,8 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         if self._parental is not None and not self._save_parental():
             return
+        self._config.hw_acceleration = self.hw_combo.currentData()
+        self._config.audio_boost = self.audio_combo.currentData()
         self._config.volume = self.volume_spin.value()
         self._config.muted = self.mute_check.isChecked()
         self._config.sync()
@@ -408,6 +528,7 @@ class ShortcutsDialog(QDialog):
             ("P", "Picture-in-Picture (PiP) floating player"),
             ("A", "Cycle Aspect Ratio (Auto / 16:9 / 4:3 / Fill)"),
             ("C / S", "Audio & Subtitle track selector"),
+            ("[ / ]", "Subtitle sync offset (±250ms delay)"),
             ("E", "Launch in External Player (VLC / MPV)"),
             ("M", "Mute / Unmute audio"),
             ("↑ / ↓", "Volume up / down (±5%)"),
