@@ -31,16 +31,10 @@ class AppConfig:
     def epg_source(self, value: str) -> None:
         self._s.setValue("epg/source", value)
 
-    def clear_playlist(self) -> None:
-        """Forget the configured playlist and its guide."""
-        self._s.remove("playlist/source")
-        self._s.remove("epg/source")
-        self.sync()
-
     # -- playback ---------------------------------------------------------
     @property
     def volume(self) -> int:
-        return int(self._s.value("player/volume", 80))
+        return int(self._s.value("player/volume", 80, type=int))
 
     @volume.setter
     def volume(self, value: int) -> None:
@@ -48,7 +42,7 @@ class AppConfig:
 
     @property
     def muted(self) -> bool:
-        return bool(self._s.value("player/muted", False))
+        return self._s.value("player/muted", False, type=bool)
 
     @muted.setter
     def muted(self, value: bool) -> None:
@@ -71,6 +65,15 @@ class AppConfig:
     @window_geometry.setter
     def window_geometry(self, value: bytes) -> None:
         self._s.setValue("ui/geometry", value)
+
+    @property
+    def sidebar_width(self) -> int:
+        return int(self._s.value("ui/sidebar_width", 212, type=int))
+
+    @sidebar_width.setter
+    def sidebar_width(self, value: int) -> None:
+        self._s.setValue("ui/sidebar_width", max(64, min(420, value)))
+
 
     def sync(self) -> None:
         self._s.sync()

@@ -98,6 +98,8 @@ class _DecodeWorker(QThread):
     recording_stopped = Signal(str)  # final path
     recording_error = Signal(str)    # human-readable failure reason
     ended = Signal()                 # natural end of stream (not user stop)
+    tracks_ready = Signal(list, list)  # audio_tracks, subtitle_tracks
+    subtitle_ready = Signal(str)        # subtitle text
 
     def __init__(self, url: str, volume: int, muted: bool,
                  headers: dict[str, str] | None = None,
@@ -114,6 +116,10 @@ class _DecodeWorker(QThread):
         self._last_shown_pts: float | None = None  # newest presented video pts
         self.error_detail: str = ""  # first failure description, if any
         self.seekable = False        # True once a finite duration is known
+        self._target_audio_index: int | None = None
+        self._target_sub_index: int | None = None
+        self._current_audio_index: int | None = None
+        self._current_sub_index: int | None = None
         # recording state (plain attributes polled from the GUI thread)
         self._rec_request: str | None = None  # pending start request
         self._rec_stop = False                # pending stop request
@@ -122,6 +128,12 @@ class _DecodeWorker(QThread):
         self._rec_path: str | None = None     # path of the active recording
 
     # -- control (called from the GUI thread) --------------------------------
+    def request_audio_track(self, index: int) -> None:
+        self._target_audio_index = int(index)
+
+    def request_subtitle_track(self, index: int | None) -> None:
+        self._target_sub_index = int(index) if index is not None else None
+
     def request_stop(self) -> None:
         self._stop_event.set()
         with self._pause_cond:
@@ -186,9 +198,31 @@ class _DecodeWorker(QThread):
         # Pick streams: biggest video, first audio; either may be missing.
         vstreams = [s for s in container.streams if s.type == "video"]
         astreams = [s for s in container.streams if s.type == "audio"]
+        substreams = [s for s in container.streams if s.type == "subtitle"]
+
+        audio_tracks = []
+        for s in astreams:
+            meta = getattr(s, "metadata", {}) or {}
+            lang = meta.get("language", "und")
+            title = meta.get("title", "")
+            codec = getattr(s.codec_context, "name", "") if hasattr(s, "codec_context") else ""
+            audio_tracks.append({"index": s.index, "language": lang, "title": title, "codec": codec})
+
+        subtitle_tracks = []
+        for s in substreams:
+            meta = getattr(s, "metadata", {}) or {}
+            lang = meta.get("language", "und")
+            title = meta.get("title", "")
+            subtitle_tracks.append({"index": s.index, "language": lang, "title": title})
+
+        self.tracks_ready.emit(audio_tracks, subtitle_tracks)
+
         vstream = (max(vstreams, key=lambda s: (s.width or 0) * (s.height or 0))
                    if vstreams else None)
         astream = astreams[0] if astreams else None
+        if astream is not None:
+            self._current_audio_index = astream.index
+        substream = None
         if vstream is None and astream is None:
             self.error_detail = "No audio/video streams found in the URL"
             self.state_changed.emit("error")
@@ -218,11 +252,12 @@ class _DecodeWorker(QThread):
             except Exception:
                 sink, device, resampler = None, None, None
 
-        streams = [s for s in (vstream, astream) if s is not None]
+        streams = [s for s in (vstream, *astreams, *substreams) if s is not None]
         self.state_changed.emit("buffering")
 
         t0: float | None = None       # wall clock anchored to pts_origin
         pts_origin: float | None = None
+        stream_pts_start: float | None = None
         position_s = 0.0
         got_first = False
         last_report = 0.0
@@ -231,6 +266,27 @@ class _DecodeWorker(QThread):
         for packet in container.demux(*streams):
             if self._stop_event.is_set():
                 break
+
+            # -- audio track switch request ----------------------------------
+            if (self._target_audio_index is not None
+                    and self._target_audio_index != self._current_audio_index):
+                target = next((s for s in astreams if s.index == self._target_audio_index), None)
+                if target is not None:
+                    astream = target
+                    self._current_audio_index = astream.index
+                    try:
+                        resampler = av.AudioResampler(format="s16", layout="stereo", rate=_AUDIO_RATE)
+                        if sink is not None:
+                            sink.reset()
+                    except Exception:
+                        pass
+
+            # -- subtitle track switch request -------------------------------
+            if self._target_sub_index != self._current_sub_index:
+                self._current_sub_index = self._target_sub_index
+                substream = next((s for s in substreams if s.index == self._target_sub_index), None)
+                if substream is None:
+                    self.subtitle_ready.emit("")
 
             # -- pause: wait with the container open, audio suspended --------
             with self._pause_cond:
@@ -263,21 +319,37 @@ class _DecodeWorker(QThread):
                     container.seek(int(ms * 1000))  # AV_TIME_BASE = µs
                     t0, pts_origin = None, None     # re-anchor on next frame
                     self._last_shown_pts = None     # forget presented history
+                    position_s = ms / 1000.0
                     if sink is not None:
                         sink.reset()
-                    # A seek would corrupt the recording's timeline: finalize
-                    # the file instead of writing discontinuous timestamps.
                     self._close_recording(
                         "Recording stopped: seeking is not supported "
                         "while recording.")
                 except Exception:
-                    pass  # live/unsupported: keep playing from current point
+                    pass
 
             # -- recording: open the output on request, mux each packet ------
             if self._rec_stop:
                 self._rec_stop = False
                 self._close_recording()
             self._maybe_start_recording(vstream, astream)
+
+            # Subtitle packet handling
+            if substream is not None and packet.stream == substream:
+                try:
+                    for sub in packet.decode():
+                        txt = getattr(sub, "text", "")
+                        if not txt and hasattr(sub, "rects"):
+                            txt = " ".join(r.text for r in sub.rects if hasattr(r, "text") and r.text)
+                        if txt:
+                            self.subtitle_ready.emit(txt)
+                except Exception:
+                    pass
+                continue
+
+            # Only decode active video and audio streams
+            if packet.stream not in (vstream, astream):
+                continue
 
             try:
                 frames = list(packet.decode())
@@ -299,7 +371,16 @@ class _DecodeWorker(QThread):
                 pts = _pts_seconds(frame)
                 if pts is None:
                     continue
-                if pts_origin is None:  # anchor the clock on the first frame
+                if stream_pts_start is None:
+                    stream_pts_start = pts
+
+                # Discontinuity detection (PTS reset, jump or HLS cut): re-anchor clock
+                if (self._last_shown_pts is not None
+                        and abs(pts - self._last_shown_pts) > 1.5):
+                    pts_origin = pts
+                    t0 = time.monotonic()
+                    self._last_shown_pts = None
+                elif pts_origin is None:  # anchor the clock on the first frame
                     pts_origin = pts
                     t0 = time.monotonic()
                 if not got_first:
@@ -321,7 +402,10 @@ class _DecodeWorker(QThread):
                 now = time.monotonic()
                 if now - last_report >= 1.0 and pts_origin is not None:
                     last_report = now
-                    pos_ms = max(0, int((position_s - pts_origin) * 1000))
+                    if stream_pts_start is not None and duration_ms > 0:
+                        pos_ms = max(0, int((position_s - stream_pts_start) * 1000))
+                    else:
+                        pos_ms = max(0, int((position_s - pts_origin) * 1000))
                     self.position_changed.emit(pos_ms, duration_ms)
 
         # Natural end of stream (or stop): release the audio device.
@@ -425,14 +509,14 @@ class _DecodeWorker(QThread):
         if self._stop_event.is_set() or self._seek_ms is not None:
             return False
         try:
-            arr = frame.to_ndarray(format="rgb24")
+            rgb = frame.reformat(format="rgb24") if frame.format.name != "rgb24" else frame
+            plane = rgb.planes[0]
+            # QImage wraps the buffer WITHOUT copying; .copy() detaches it
+            # so the decoder can safely reuse the buffer for the next frame.
+            img = QImage(memoryview(plane), rgb.width, rgb.height,
+                         plane.line_size, QImage.Format_RGB888).copy()
         except Exception:
             return False
-        h, w = int(arr.shape[0]), int(arr.shape[1])
-        # QImage wraps the numpy buffer WITHOUT copying; .copy() detaches it
-        # so the decoder can safely reuse the buffer for the next frame.
-        img = QImage(arr.data, w, h, 3 * w,
-                     QImage.Format_RGB888).copy()
         if img.isNull():
             return False
         self.frame_ready.emit(img)
@@ -443,7 +527,7 @@ class _DecodeWorker(QThread):
         """Resample to s16/stereo/44.1k and push PCM in ~8 KB chunks."""
         try:
             for af in resampler.resample(frame):
-                data = bytes(af.to_ndarray())
+                data = bytes(af.planes[0])
                 off = 0
                 while off < len(data):
                     if self._stop_event.is_set():
@@ -470,6 +554,8 @@ class Player(QObject):
     state_changed = Signal(str)       # playing | paused | stopped | error | buffering
     position_changed = Signal(int, int)  # position_ms, duration_ms
     frame_ready = Signal(QImage)      # decoded video frame (already copied)
+    tracks_ready = Signal(list, list)  # audio_tracks, subtitle_tracks
+    subtitle_ready = Signal(str)      # current subtitle text
     recording_started = Signal(str)  # path
     recording_stopped = Signal(str)  # final path
     recording_error = Signal(str)    # human-readable failure reason
@@ -478,6 +564,7 @@ class Player(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._worker: _DecodeWorker | None = None
+        self._worker_connections: list = []
         self._zombies: list[_DecodeWorker] = []  # stuck workers dying on their own
         self._widget = None           # target VideoWidget (no native handles)
         self._volume = 80
@@ -486,6 +573,10 @@ class Player(QObject):
         self._last_error = ""         # human-readable reason for last failure
         self._last_pos_s = 0.0        # last reported position, seconds
         self._last_dur_s: float | None = None  # last reported duration, s
+        self._audio_tracks: list[dict] = []
+        self._subtitle_tracks: list[dict] = []
+        self._current_audio_track: int = 0
+        self._current_subtitle_track: int = -1
 
     # -- setup ------------------------------------------------------------------
     @staticmethod
@@ -497,8 +588,15 @@ class Player(QObject):
         return _AV_IMPORT_ERROR
 
     def attach(self, widget) -> None:
-        """Remember the target video widget. No native handles involved."""
+        """Remember the target video widget and hook subtitle delivery."""
+        if self._widget is not None and hasattr(self._widget, "set_subtitle"):
+            try:
+                self.subtitle_ready.disconnect(self._widget.set_subtitle)
+            except (RuntimeError, TypeError):
+                pass
         self._widget = widget
+        if self._widget is not None and hasattr(self._widget, "set_subtitle"):
+            self.subtitle_ready.connect(self._widget.set_subtitle)
 
     # -- transport ----------------------------------------------------------------
     def play(self, url: str,
@@ -515,19 +613,35 @@ class Player(QObject):
         self._last_error = ""
         self._last_pos_s = 0.0
         self._last_dur_s = None
+        self._audio_tracks = []
+        self._subtitle_tracks = []
+        self._current_audio_track = 0
+        self._current_subtitle_track = -1
         self._worker = _DecodeWorker(
             url, self._volume, self._muted, dict(headers or {}))
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
-        self._worker.frame_ready.connect(self.frame_ready.emit)
-        self._worker.state_changed.connect(self.state_changed.emit)
-        self._worker.state_changed.connect(self._capture_worker_error)
-        self._worker.position_changed.connect(self.position_changed.emit)
-        self._worker.position_changed.connect(self._track_position)
-        self._worker.recording_started.connect(self.recording_started.emit)
-        self._worker.recording_stopped.connect(self.recording_stopped.emit)
-        self._worker.recording_error.connect(self.recording_error.emit)
-        self._worker.ended.connect(self.playback_finished.emit)
+        self._worker_connections = [
+            self._worker.frame_ready.connect(self.frame_ready.emit),
+            self._worker.state_changed.connect(self.state_changed.emit),
+            self._worker.state_changed.connect(self._capture_worker_error),
+            self._worker.position_changed.connect(self.position_changed.emit),
+            self._worker.position_changed.connect(self._track_position),
+            self._worker.tracks_ready.connect(self._on_tracks_ready),
+            self._worker.subtitle_ready.connect(self.subtitle_ready.emit),
+            self._worker.recording_started.connect(self.recording_started.emit),
+            self._worker.recording_stopped.connect(self.recording_stopped.emit),
+            self._worker.recording_error.connect(self.recording_error.emit),
+            self._worker.ended.connect(self.playback_finished.emit),
+        ]
         self._worker.start()
+
+    def _on_tracks_ready(self, audio: list, subs: list) -> None:
+        self._audio_tracks = audio
+        self._subtitle_tracks = subs
+        if audio:
+            self._current_audio_track = audio[0].get("index", 0)
+        self._current_subtitle_track = -1
+        self.tracks_ready.emit(audio, subs)
 
     def _track_position(self, pos_ms: int, dur_ms: int) -> None:
         self._last_pos_s = max(0.0, pos_ms / 1000.0)
@@ -547,6 +661,12 @@ class Player(QObject):
 
     def stop(self) -> None:
         self.stop_recording()  # finalize any recording first
+        for conn in getattr(self, "_worker_connections", []):
+            try:
+                QObject.disconnect(conn)
+            except (RuntimeError, TypeError):
+                pass
+        self._worker_connections = []
         worker, self._worker = self._worker, None
         if worker is not None:
             worker.request_stop()
@@ -561,8 +681,11 @@ class Player(QObject):
                     if w in self._zombies else None)
         self.state_changed.emit("stopped")
         self.position_changed.emit(0, 0)
-        if self._widget is not None and hasattr(self._widget, "clear"):
-            self._widget.clear()
+        if self._widget is not None:
+            if hasattr(self._widget, "clear"):
+                self._widget.clear()
+            if hasattr(self._widget, "set_subtitle"):
+                self._widget.set_subtitle("")
 
     def toggle_pause(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -626,3 +749,35 @@ class Player(QObject):
         self._muted = bool(muted)
         if self._worker is not None:
             self._worker.set_mute(self._muted)
+
+    # -- tracks & subtitles ---------------------------------------------------------
+    def audio_tracks(self) -> list[dict]:
+        """Return list of available audio tracks with metadata."""
+        return list(self._audio_tracks)
+
+    def subtitle_tracks(self) -> list[dict]:
+        """Return list of available subtitle tracks with metadata."""
+        return list(self._subtitle_tracks)
+
+    def set_audio_track(self, index: int) -> None:
+        """Switch audio track by stream index."""
+        self._current_audio_track = index
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.request_audio_track(index)
+
+    def set_subtitle_track(self, index: int | None) -> None:
+        """Switch subtitle track by stream index, or None / -1 to disable."""
+        sub_idx = index if index is not None and index >= 0 else None
+        self._current_subtitle_track = sub_idx if sub_idx is not None else -1
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.request_subtitle_track(sub_idx)
+        if sub_idx is None and self._widget is not None and hasattr(self._widget, "set_subtitle"):
+            self._widget.set_subtitle("")
+
+    @property
+    def current_audio_track(self) -> int:
+        return self._current_audio_track
+
+    @property
+    def current_subtitle_track(self) -> int:
+        return self._current_subtitle_track

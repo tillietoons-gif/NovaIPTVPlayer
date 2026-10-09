@@ -11,7 +11,7 @@ import math
 import requests
 from PySide6.QtCore import (
     Qt, Signal, Slot, QRunnable, QThreadPool, QObject,
-    QPoint, QPointF, QRectF, QSize, QTimer, QPropertyAnimation,
+    QPoint, QPointF, QRect, QRectF, QSize, QTimer, QPropertyAnimation,
     QEasingCurve,
 )
 from PySide6.QtGui import (
@@ -197,6 +197,50 @@ def make_icon(name: str, size: int = 20,
         p.drawPolyline([QPointF(s * 0.52, s * 0.70),
                         QPointF(s * 0.70, s * 0.70),
                         QPointF(s * 0.70, s * 0.52)])
+    elif name in ("back", "arrow_left"):
+        line(0.72, 0.50, 0.28, 0.50)
+        p.drawPolyline([
+            QPointF(s * 0.48, s * 0.30),
+            QPointF(s * 0.28, s * 0.50),
+            QPointF(s * 0.48, s * 0.70),
+        ])
+    elif name == "compress":
+        line(0.24, 0.46, 0.46, 0.46)
+        line(0.46, 0.24, 0.46, 0.46)
+        line(0.24, 0.24, 0.46, 0.46)
+        line(0.76, 0.54, 0.54, 0.54)
+        line(0.54, 0.76, 0.54, 0.54)
+        line(0.76, 0.76, 0.54, 0.54)
+    elif name == "volume":
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawPolygon([
+            QPointF(s * 0.18, s * 0.38),
+            QPointF(s * 0.34, s * 0.38),
+            QPointF(s * 0.50, s * 0.22),
+            QPointF(s * 0.50, s * 0.78),
+            QPointF(s * 0.34, s * 0.62),
+            QPointF(s * 0.18, s * 0.62),
+        ])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(s * 0.44, s * 0.32, s * 0.26, s * 0.36), -50 * 16, 100 * 16)
+        p.drawArc(QRectF(s * 0.44, s * 0.20, s * 0.40, s * 0.60), -50 * 16, 100 * 16)
+    elif name == "mute":
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawPolygon([
+            QPointF(s * 0.18, s * 0.38),
+            QPointF(s * 0.34, s * 0.38),
+            QPointF(s * 0.50, s * 0.22),
+            QPointF(s * 0.50, s * 0.78),
+            QPointF(s * 0.34, s * 0.62),
+            QPointF(s * 0.18, s * 0.62),
+        ])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        line(0.64, 0.36, 0.82, 0.64)
+        line(0.82, 0.36, 0.64, 0.64)
     elif name == "trash":
         line(0.38, 0.24, 0.62, 0.24)                      # lid
         line(0.32, 0.24, 0.68, 0.24)
@@ -223,8 +267,57 @@ def make_icon(name: str, size: int = 20,
         p.setBrush(col)
         p.drawEllipse(QPointF(s * 0.50, s * 0.50),
                       s * 0.30, s * 0.30)                 # record dot
+    elif name in ("help", "question"):
+        p.drawEllipse(QRectF(s * 0.18, s * 0.18, s * 0.64, s * 0.64))
+        p.drawArc(QRectF(s * 0.38, s * 0.30, s * 0.24, s * 0.20), 0, 180 * 16)
+        line(0.62, 0.40, 0.50, 0.52)
+        line(0.50, 0.52, 0.50, 0.60)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QRectF(s * 0.46, s * 0.68, s * 0.08, s * 0.08))
+    elif name == "aspect":
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.26, s * 0.68, s * 0.48), 3, 3)
+        line(0.32, 0.44, 0.44, 0.56)
+        line(0.44, 0.44, 0.32, 0.56)
+        line(0.56, 0.44, 0.68, 0.56)
+    elif name == "pip":
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.22, s * 0.68, s * 0.56), 4, 4)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawRoundedRect(QRectF(s * 0.48, s * 0.46, s * 0.30, s * 0.26), 2, 2)
+    elif name in ("subtitle", "cc"):
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.26, s * 0.68, s * 0.48), 4, 4)
+        line(0.32, 0.42, 0.46, 0.42)
+        line(0.32, 0.50, 0.46, 0.50)
+        line(0.32, 0.58, 0.46, 0.58)
+        line(0.54, 0.42, 0.68, 0.42)
+        line(0.54, 0.50, 0.68, 0.50)
+        line(0.54, 0.58, 0.68, 0.58)
+    elif name in ("calendar", "epg"):
+        p.drawRoundedRect(QRectF(s * 0.20, s * 0.24, s * 0.60, s * 0.56), 4, 4)
+        line(0.20, 0.40, 0.80, 0.40)
+        line(0.35, 0.18, 0.35, 0.28)
+        line(0.65, 0.18, 0.65, 0.28)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawRect(QRectF(s * 0.32, s * 0.48, s * 0.10, s * 0.08))
+        p.drawRect(QRectF(s * 0.48, s * 0.48, s * 0.10, s * 0.08))
+        p.drawRect(QRectF(s * 0.32, s * 0.62, s * 0.10, s * 0.08))
+        p.drawRect(QRectF(s * 0.48, s * 0.62, s * 0.10, s * 0.08))
+    elif name in ("external", "launch"):
+        line(0.28, 0.42, 0.28, 0.74)
+        line(0.28, 0.74, 0.72, 0.74)
+        line(0.72, 0.74, 0.72, 0.48)
+        line(0.46, 0.54, 0.72, 0.28)
+        line(0.54, 0.28, 0.72, 0.28)
+        line(0.72, 0.28, 0.72, 0.46)
+    elif name in ("sidebar", "menu"):
+        line(0.24, 0.32, 0.76, 0.32)
+        line(0.24, 0.50, 0.76, 0.50)
+        line(0.24, 0.68, 0.76, 0.68)
     p.end()
     return QIcon(pm)
+
 
 
 def brand_pixmap(size: int = 36) -> QPixmap:
@@ -309,13 +402,20 @@ def quality_of(channel: Channel) -> str:
     n = channel.name.lower()
     if "4k" in n or "uhd" in n:
         return "4K"
+    if "fhd" in n or "1080" in n:
+        return "FHD"
     return "HD"
+
 
 
 # -- async image loading ----------------------------------------------------
 
+_IMAGE_CACHE: dict[str, QImage] = {}
+_MAX_IMAGE_CACHE = 600
+
+
 class _ImageSignals(QObject):
-    done = Signal(QImage)
+    done = Signal(str, QImage)
 
 
 class _ImageLoader(QRunnable):
@@ -328,13 +428,16 @@ class _ImageLoader(QRunnable):
         self.setAutoDelete(True)
 
     def run(self) -> None:  # runs in a worker thread
+        if self.url in _IMAGE_CACHE:
+            self.signals.done.emit(self.url, _IMAGE_CACHE[self.url])
+            return
         try:
             resp = requests.get(self.url, timeout=8,
                                 headers={"User-Agent": "NovaIPTV/1.0"})
             resp.raise_for_status()
             img = QImage.fromData(resp.content)
             if not img.isNull():
-                self.signals.done.emit(img)
+                self.signals.done.emit(self.url, img)
         except Exception:
             pass  # keep the placeholder
 
@@ -356,32 +459,50 @@ def _placeholder_pixmap(size: int) -> QPixmap:
 
 
 class LogoLabel(QLabel):
-    """QLabel that loads a remote logo asynchronously with a placeholder."""
+    """QLabel that loads a remote logo asynchronously with in-memory caching and placeholder."""
 
     _pool = QThreadPool.globalInstance()
 
     def __init__(self, size: int = 56, parent=None) -> None:
         super().__init__(parent)
         self._size = size
+        self._url = ""
         self.setFixedSize(size, size)
         self.setAlignment(Qt.AlignCenter)
         self.setPixmap(_placeholder_pixmap(size))
         self._loader: _ImageLoader | None = None
 
     def load(self, url: str) -> None:
-        self.setPixmap(_placeholder_pixmap(self._size))
+        self._url = url or ""
         if not url:
+            self.setPixmap(_placeholder_pixmap(self._size))
             return
+        if url in _IMAGE_CACHE:
+            self._apply_image(_IMAGE_CACHE[url])
+            return
+
+        self.setPixmap(_placeholder_pixmap(self._size))
         self._loader = _ImageLoader(url)
         self._loader.signals.done.connect(self._on_image)
         self._pool.start(self._loader)
 
-    def _on_image(self, img: QImage) -> None:
+    def _apply_image(self, img: QImage) -> None:
         pix = QPixmap.fromImage(img).scaled(
             self._size, self._size,
             Qt.KeepAspectRatio, Qt.SmoothTransformation,
         )
         self.setPixmap(pix)
+
+    def _on_image(self, url: str, img: QImage) -> None:
+        if url:
+            if len(_IMAGE_CACHE) >= _MAX_IMAGE_CACHE:
+                try:
+                    _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)))
+                except (StopIteration, KeyError):
+                    pass
+            _IMAGE_CACHE[url] = img
+        if self._url == url:
+            self._apply_image(img)
 
 
 # -- small building blocks ----------------------------------------------------
@@ -470,7 +591,7 @@ class SectionHeader(QWidget):
 
 
 class StatPill(QLabel):
-    """Connection status pill: green dot LIVE CONNECTED / grey OFFLINE."""
+    """Connection status pill: emerald beacon LIVE CONNECTED / slate OFFLINE."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -481,8 +602,8 @@ class StatPill(QLabel):
         dot = COLORS["green"] if ok else COLORS["muted"]
         text = "LIVE CONNECTED" if ok else "OFFLINE"
         self.setText(
-            f'<span style="color:{dot}; font-size:12px;">●</span>'
-            f'&nbsp;&nbsp;{text}'
+            f'<span style="color:{dot}; font-size:11px;">●</span>'
+            f'&nbsp;&nbsp;<span style="letter-spacing:0.8px;">{text}</span>'
         )
 
 
@@ -490,8 +611,9 @@ class SearchBar(QLineEdit):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("searchBar")
-        self.setPlaceholderText("Search channels, movies, series...")
+        self.setPlaceholderText("Search channels, movies, series...  (Ctrl+K or /)")
         self.setClearButtonEnabled(True)
+
 
 
 class ElidedLabel(QLabel):
@@ -727,19 +849,15 @@ class Drawer(QObject):
 # -- video display ---------------------------------------------------------------
 
 class VideoWidget(QWidget):
-    """Displays decoded video frames from the player engine.
-
-    Frames arrive via the ``set_frame`` slot (emitted from the decode
-    thread -- Qt queues the call into the GUI thread automatically).
-    Each frame is painted aspect-fit and centered on a black background;
-    before the first frame (or after ``clear()``) a placeholder is shown.
-    """
+    """Displays decoded video frames from the player engine with aspect ratio and subtitle overlay."""
 
     def __init__(self, parent=None, placeholder: str = "No signal") -> None:
         super().__init__(parent)
         self.setObjectName("videoFrame")
         self._pixmap: QPixmap | None = None
         self._placeholder = placeholder
+        self._aspect_ratio: str = "auto"  # auto | 16:9 | 4:3 | fill
+        self._subtitle_text: str = ""
 
     @Slot(QImage)
     def set_frame(self, img: QImage) -> None:
@@ -748,26 +866,153 @@ class VideoWidget(QWidget):
         self._pixmap = QPixmap.fromImage(img)
         self.update()  # schedule a repaint in the GUI thread
 
+    def set_aspect_ratio(self, ratio: str) -> None:
+        self._aspect_ratio = (ratio or "auto").lower()
+        self.update()
+
+    def aspect_ratio(self) -> str:
+        return self._aspect_ratio
+
+    def set_subtitle(self, text: str) -> None:
+        self._subtitle_text = text or ""
+        self.update()
+
     def clear(self) -> None:
         """Forget the last frame and show the placeholder again."""
         self._pixmap = None
+        self._subtitle_text = ""
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.black)
         if self._pixmap is not None and not self._pixmap.isNull():
-            scaled = self._pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            w, h = self.width(), self.height()
+            mode = self._aspect_ratio
+            if mode == "fill":
+                painter.drawPixmap(self.rect(), self._pixmap)
+            elif mode == "16:9":
+                target_ratio = 16.0 / 9.0
+                if w / max(1, h) > target_ratio:
+                    target_w = int(h * target_ratio)
+                    target_h = h
+                else:
+                    target_w = w
+                    target_h = int(w / target_ratio)
+                x = (w - target_w) // 2
+                y = (h - target_h) // 2
+                painter.drawPixmap(QRect(x, y, target_w, target_h), self._pixmap)
+            elif mode == "4:3":
+                target_ratio = 4.0 / 3.0
+                if w / max(1, h) > target_ratio:
+                    target_w = int(h * target_ratio)
+                    target_h = h
+                else:
+                    target_w = w
+                    target_h = int(w / target_ratio)
+                x = (w - target_w) // 2
+                y = (h - target_h) // 2
+                painter.drawPixmap(QRect(x, y, target_w, target_h), self._pixmap)
+            else:  # auto
+                scaled = self._pixmap.scaled(
+                    self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                x = (w - scaled.width()) // 2
+                y = (h - scaled.height()) // 2
+                painter.drawPixmap(x, y, scaled)
+
+            # Draw subtitle overlay
+            if self._subtitle_text:
+                painter.setRenderHint(QPainter.Antialiasing)
+                f = QFont("Segoe UI", 12)
+                f.setBold(True)
+                painter.setFont(f)
+                fm = QFontMetrics(f)
+                text_rect = fm.boundingRect(
+                    QRect(20, h - 85, w - 40, 65),
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    self._subtitle_text,
+                )
+                bg_rect = text_rect.adjusted(-10, -4, 10, 4)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 190))
+                painter.drawRoundedRect(bg_rect, 6, 6)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    self._subtitle_text,
+                )
         else:
             painter.setPen(QColor(COLORS["muted"]))
             painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
 
 
+class AudioVisualizer(QWidget):
+    """Dynamic bouncing equalizer spectrum bars drawn with QPainter."""
+
+    def __init__(self, parent=None, bar_count: int = 4) -> None:
+        super().__init__(parent)
+        self._bar_count = bar_count
+        self._phase = 0.0
+        self._active = False
+        self.setFixedSize(26, 18)
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)  # ~20 FPS
+        self._timer.timeout.connect(self._tick)
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if active and animations_enabled():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+            self.update()
+
+    def start(self) -> None:
+        self.set_active(True)
+
+    def stop(self) -> None:
+        self.set_active(False)
+
+    def _tick(self) -> None:
+        self._phase += 0.28
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = float(self.width())
+        h = float(self.height())
+        bar_w = 3.5
+        gap = 2.5
+        total_w = self._bar_count * bar_w + (self._bar_count - 1) * gap
+        start_x = (w - total_w) / 2.0
+
+        for i in range(self._bar_count):
+            if self._active:
+                val1 = (math.sin(self._phase + i * 1.4) + 1.0) / 2.0
+                val2 = (math.cos(self._phase * 0.75 + i * 0.85) + 1.0) / 2.0
+                norm = 0.25 + 0.70 * ((val1 + val2) / 2.0)
+            else:
+                norm = 0.20
+
+            bar_h = max(3.0, h * norm)
+            x = start_x + i * (bar_w + gap)
+            y = h - bar_h
+
+            grad = QLinearGradient(x, y, x, h)
+            grad.setColorAt(0.0, QColor(COLORS.get("cyan", "#06b6d4")))
+            grad.setColorAt(1.0, QColor(COLORS.get("accent", "#8b5cf6")))
+
+            p.setPen(Qt.NoPen)
+            p.setBrush(grad)
+            p.drawRoundedRect(QRectF(x, y, bar_w, bar_h), 1.5, 1.5)
+        p.end()
+
+
 # -- channel card / grid -----------------------------------------------------
+
 
 class _LogoArea(QWidget):
     """Logo with LIVE / quality badges overlaid (top-left / top-right)."""
@@ -814,6 +1059,7 @@ class _LogoArea(QWidget):
 class ChannelCard(QFrame):
     clicked = Signal(object)            # Channel
     fav_toggled = Signal(object, bool)  # Channel, new_state
+    context_menu_requested = Signal(object, object)  # Channel, global_pos
 
     def __init__(self, channel: Channel, is_fav: bool = False,
                  epg_text: str = "", parent=None) -> None:
@@ -861,6 +1107,10 @@ class ChannelCard(QFrame):
             self.clicked.emit(self.channel)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.context_menu_requested.emit(self.channel, event.globalPos())
+        event.accept()
+
     def _on_fav(self, checked: bool) -> None:
         self.fav_btn.setIcon(make_icon(
             "star" if checked else "star_outline", 18,
@@ -893,6 +1143,7 @@ class ChannelGrid(QWidget):
 
     channel_chosen = Signal(object)
     fav_toggled = Signal(object, bool)
+    channel_context_menu = Signal(object, object)  # Channel, global_pos
 
     CARD_MIN_WIDTH = 170
     CARD_SPACING = 12
@@ -1046,6 +1297,7 @@ class ChannelGrid(QWidget):
             card = ChannelCard(ch, ch.url in self._favorites, epg_text)
             card.clicked.connect(self.channel_chosen.emit)
             card.fav_toggled.connect(self.fav_toggled.emit)
+            card.context_menu_requested.connect(self.channel_context_menu.emit)
             card.set_locked(ch.display_group in self._locked_groups)
             card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self._grid.addWidget(card, i // cols, i % cols)
@@ -1175,9 +1427,13 @@ class HeroCard(QFrame):
         left.setSpacing(8)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
         self.live_badge = QLabel('<span style="font-size:9px;">●</span> LIVE')
         self.live_badge.setObjectName("liveBadge")
         top_row.addWidget(self.live_badge)
+        self.quality_tag = QLabel("4K UHD")
+        self.quality_tag.setObjectName("qualityBadge")
+        top_row.addWidget(self.quality_tag)
         self.kicker = QLabel("FEATURED")
         self.kicker.setObjectName("heroKicker")
         top_row.addWidget(self.kicker)
@@ -1256,14 +1512,19 @@ class HeroCard(QFrame):
             self.subtitle.setText(
                 "Add an M3U playlist to browse live TV, movies and series.")
             self.kicker.setText("FEATURED")
+            self.quality_tag.hide()
             self.art.setPixmap(poster_pixmap(320, 190, "", "hero-empty"))
             return
         self.kicker.setText(channel.display_group.upper())
         self.title.setText(channel.name)
+        q = quality_of(channel)
+        self.quality_tag.setText(f"★ {q} ULTRA HD" if q == "4K" else f"★ {q}")
+        self.quality_tag.show()
         sub = "Live coverage"
         if now:
             sub = f"{now.title}  •  {now.start.strftime('%H:%M')}–{now.stop.strftime('%H:%M')}"
         elif channel.kind != "live":
             sub = channel.display_group
         self.subtitle.setText(sub)
+
         self.art.setPixmap(poster_pixmap(320, 190, channel.name, channel.url))

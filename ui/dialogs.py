@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFileDialog, QTabWidget, QWidget, QSpinBox,
     QFormLayout, QDialogButtonBox, QCheckBox, QListWidget,
-    QListWidgetItem, QMessageBox,
+    QListWidgetItem, QMessageBox, QGridLayout,
 )
 
 from ui.theme import UiPrefs
@@ -82,11 +82,18 @@ class SettingsDialog(QDialog):
     SHORTCUTS = [
         ("Space", "Play / pause"),
         ("F", "Fullscreen"),
+        ("P", "Picture-in-Picture"),
+        ("A", "Aspect ratio"),
+        ("C / S", "Audio & Subtitle tracks"),
+        ("E", "External player"),
         ("M", "Mute / unmute"),
         ("Left / Right", "Previous / next channel"),
-        ("/", "Focus search"),
+        ("Ctrl+K / /", "Quick spotlight search"),
+        ("[", "Toggle sidebar collapse"),
         ("Esc", "Close panel or dialog"),
     ]
+
+
 
     def __init__(self, config, parent=None, parental=None, groups=None) -> None:
         super().__init__(parent)
@@ -358,3 +365,65 @@ class _ChangePinDialog(QDialog):
                                 "The current PIN is incorrect.")
             return
         self.accept()
+
+
+class ShortcutsDialog(QDialog):
+    """Clean reference cheat-sheet for keyboard shortcuts."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard Shortcuts")
+        self.setObjectName("shortcutsDialog")
+        self.setMinimumWidth(460)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(14)
+
+        title = QLabel("Keyboard Shortcuts")
+        title.setObjectName("dlgTitle")
+        lay.addWidget(title)
+
+        sub = QLabel("Quickly navigate, control playback, and adjust volume:")
+        sub.setObjectName("cardMeta")
+        lay.addWidget(sub)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+
+        shortcuts = [
+            ("Space", "Play / Pause stream"),
+            ("F", "Toggle Fullscreen mode"),
+            ("P", "Picture-in-Picture (PiP) floating player"),
+            ("A", "Cycle Aspect Ratio (Auto / 16:9 / 4:3 / Fill)"),
+            ("C / S", "Audio & Subtitle track selector"),
+            ("E", "Launch in External Player (VLC / MPV)"),
+            ("M", "Mute / Unmute audio"),
+            ("↑ / ↓", "Volume up / down (±5%)"),
+            ("← / →", "Prev / Next channel (or Seek ±10s in VOD)"),
+            ("Ctrl+K / /", "Quick spotlight search"),
+            ("[", "Toggle sidebar collapse / icon rail"),
+            ("Esc", "Exit Fullscreen / Close drawer / Cancel"),
+            ("? / F1", "Show this shortcuts help dialog"),
+
+
+        ]
+
+        for row, (key_label, desc) in enumerate(shortcuts):
+            k_box = QLabel(key_label)
+            k_box.setObjectName("keyBadge")
+            k_box.setAlignment(Qt.AlignCenter)
+            d_lbl = QLabel(desc)
+            d_lbl.setObjectName("keyDesc")
+            grid.addWidget(k_box, row, 0, Qt.AlignLeft)
+            grid.addWidget(d_lbl, row, 1, Qt.AlignVCenter)
+
+        lay.addLayout(grid)
+        lay.addSpacing(6)
+
+        btn = QPushButton("Got it")
+        btn.setObjectName("primaryBtn")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.accept)
+        lay.addWidget(btn, 0, Qt.AlignRight)

@@ -11,7 +11,7 @@ import xmltodict
 
 from app.models import EPGProgram
 
-_EPG_TIME_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
+_EPG_TIME_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S%z", "%Y%m%d%H%M%S")
 
 
 def _parse_time(value: str) -> datetime:
