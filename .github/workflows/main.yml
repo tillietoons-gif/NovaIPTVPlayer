@@ -24,9 +24,6 @@ jobs:
           python-version: "3.11"
           architecture: "x64"
 
-      - name: Install VLC 64-bit (for libvlc)
-        run: choco install vlc -y --no-progress
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -39,13 +36,6 @@ jobs:
             --name NovaIPTVPlayer `
             --collect-all PySide6 `
             main.py
-
-          # Bundle VLC runtime (python-vlc loads libvlc at runtime)
-          $vlc = "C:\Program Files\VideoLAN\VLC"
-          $dest = "dist\NovaIPTVPlayer"
-          Copy-Item "$vlc\libvlc.dll" $dest
-          Copy-Item "$vlc\libvlccore.dll" $dest
-          Copy-Item "$vlc\plugins" "$dest\plugins" -Recurse
 
       - name: Zip portable app
         shell: pwsh

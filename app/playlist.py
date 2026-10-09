@@ -61,13 +61,21 @@ def parse_m3u(text: str) -> list[Channel]:
         else:
             # This line is the stream URL for the pending EXTINF entry.
             url = line
+            if not url or not _looks_like_stream_url(url):
+                pending_name = ""
+                pending_attrs = {}
+                continue
             if pending_name or url:
                 group = (
                     pending_attrs.get("group-title")
                     or pending_attrs.get("group_title")
                     or ""
                 )
-                name = pending_name or url.rsplit("/", 1)[-1]
+                name = pending_name.strip() or url.rsplit("/", 1)[-1]
+                if not name:
+                    pending_name = ""
+                    pending_attrs = {}
+                    continue
                 channels.append(
                     Channel(
                         name=name,
@@ -90,6 +98,19 @@ def _looks_like_url(source: str) -> bool:
         return False
 
 
+def _looks_like_stream_url(value: str) -> bool:
+    value = value.strip()
+    if not value:
+        return False
+    try:
+        scheme = urlparse(value).scheme.lower()
+    except Exception:
+        return False
+    if scheme in {"http", "https", "ftp", "rtmp", "rtmps", "rtsp", "rtp", "udp", "tcp", "mms", "file"}:
+        return True
+    return False
+
+
 def load_playlist(source: str, timeout: int = 30) -> list[Channel]:
     """Load a playlist from a local file path or a remote URL."""
     source = source.strip()
@@ -100,12 +121,18 @@ def load_playlist(source: str, timeout: int = 30) -> list[Channel]:
             source,
             timeout=timeout,
             headers={"User-Agent": "NovaIPTV/1.0"},
+            allow_redirects=True,
         )
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding or "utf-8"
         text = resp.text
     else:
-        text = Path(source).expanduser().read_text(encoding="utf-8", errors="replace")
+        path = Path(source).expanduser()
+        if not path.exists() or not path.is_file():
+            raise ValueError(f"Playlist file does not exist: {source}")
+        text = path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        raise ValueError("Playlist source is empty or unreadable.")
     return parse_m3u(text)
 
 

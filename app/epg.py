@@ -30,6 +30,14 @@ def _parse_time(value: str) -> datetime:
 def _text(node) -> str:
     if node is None:
         return ""
+    if isinstance(node, list):
+        if not node:
+            return ""
+        return _text(node[0])
+    if isinstance(node, tuple):
+        if not node:
+            return ""
+        return _text(node[0])
     if isinstance(node, dict):
         return str(node.get("#text", "") or "")
     return str(node)
@@ -52,14 +60,26 @@ class EPGManager:
             raise ValueError("EPG source is empty.")
         if urlparse(source).scheme in ("http", "https", "ftp"):
             resp = requests.get(
-                source, timeout=timeout, headers={"User-Agent": "NovaIPTV/1.0"}
+                source,
+                timeout=timeout,
+                headers={"User-Agent": "NovaIPTV/1.0"},
+                allow_redirects=True,
             )
             resp.raise_for_status()
             data = resp.content
         else:
-            data = Path(source).expanduser().read_bytes()
+            path = Path(source).expanduser()
+            if not path.exists() or not path.is_file():
+                raise ValueError(f"EPG file does not exist: {source}")
+            data = path.read_bytes()
 
-        doc = xmltodict.parse(data, force_list=("channel", "programme"))
+        if not data:
+            raise ValueError("EPG source is empty or unreadable.")
+
+        try:
+            doc = xmltodict.parse(data, force_list=("channel", "programme"))
+        except Exception as exc:  # pragma: no cover - parsing failure is runtime input
+            raise ValueError(f"Invalid XMLTV document: {exc}") from exc
         tv = doc.get("tv") or {}
 
         channels: dict[str, str] = {}

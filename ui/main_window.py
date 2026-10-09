@@ -12,10 +12,10 @@ from PySide6.QtCore import (
     QAbstractAnimation,
 )
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QPushButton,
     QStackedWidget, QLabel, QSlider, QComboBox, QMessageBox,
     QScrollArea, QDialog, QDialogButtonBox, QMenu, QFormLayout,
-    QLineEdit, QAbstractButton, QGraphicsOpacityEffect,
+    QLineEdit, QAbstractButton, QGraphicsOpacityEffect, QProgressBar,
 )
 
 from app import __app_name__, __version__
@@ -970,6 +970,12 @@ class MainWindow(QMainWindow):
 
     # -- navigation -----------------------------------------------------------
     def _navigate(self, key: str) -> None:
+        if key not in self._pages:
+            return
+
+        if self._current_page == key and self.stack.currentWidget() is self._pages[key]:
+            return
+
         for k, btn in self._nav_btns.items():
             btn.setChecked(k == key)
         idx = [k for k, _l, _i in NAV_ITEMS].index(key)
