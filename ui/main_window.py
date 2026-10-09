@@ -820,12 +820,23 @@ class MainWindow(QMainWindow):
         self.playlist_card = QFrame()
         self.playlist_card.setObjectName("sideCard")
         lay.addWidget(self.playlist_card)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
         add_btn = QPushButton("  Add playlist")
         add_btn.setObjectName("primaryBtn")
         add_btn.setIcon(make_icon("plus", 16, "white"))
         add_btn.setCursor(Qt.PointingHandCursor)
         add_btn.clicked.connect(self._open_add_dialog)
-        lay.addWidget(add_btn, 0, Qt.AlignLeft)
+        btn_row.addWidget(add_btn)
+        self.remove_playlist_btn = QPushButton("  Remove playlist")
+        self.remove_playlist_btn.setObjectName("dangerBtn")
+        self.remove_playlist_btn.setIcon(
+            make_icon("trash", 16, COLORS["red"]))
+        self.remove_playlist_btn.setCursor(Qt.PointingHandCursor)
+        self.remove_playlist_btn.clicked.connect(self._remove_playlist)
+        btn_row.addWidget(self.remove_playlist_btn)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
         lay.addStretch(1)
         return page
 
@@ -853,6 +864,39 @@ class MainWindow(QMainWindow):
         epg.setObjectName("cardMeta")
         epg.setWordWrap(True)
         lay.addWidget(epg)
+        self.remove_playlist_btn.setVisible(bool(self.config.playlist_source))
+
+    def _remove_playlist(self) -> None:
+        """Remove the configured playlist after confirmation."""
+        if not self.config.playlist_source:
+            return
+        name = self._playlist_name()
+        answer = QMessageBox.question(
+            self, "Remove playlist",
+            f"Remove the playlist \"{name}\"?\n\n"
+            "All channels, movies and series will be unloaded and "
+            "playback will stop. Your favorites are kept and will "
+            "reappear if you add the playlist again.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.player.stop()
+        self.channels = []
+        self.epg = EPGManager()
+        self._play_context = []
+        self._play_index = 0
+        self._current_channel = None
+        self.config.clear_playlist()
+        self.thumb_video.clear()
+        self.np_title.setText("Nothing playing")
+        self.np_meta.setText("")
+        self.pp_btn.setIcon(make_icon("play", 18))
+        self._update_now_next()
+        self._update_status()
+        self._update_bell()
+        self._refresh_grid()
+        self._refresh_home()
+        self._refresh_playlist_card()
 
     # -- right panel ---------------------------------------------------------------
     def _build_right_panel(self) -> QWidget:

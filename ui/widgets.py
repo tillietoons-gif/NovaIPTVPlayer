@@ -197,6 +197,16 @@ def make_icon(name: str, size: int = 20,
         p.drawPolyline([QPointF(s * 0.52, s * 0.70),
                         QPointF(s * 0.70, s * 0.70),
                         QPointF(s * 0.70, s * 0.52)])
+    elif name == "trash":
+        line(0.38, 0.24, 0.62, 0.24)                      # lid
+        line(0.32, 0.24, 0.68, 0.24)
+        line(0.46, 0.24, 0.46, 0.18)
+        line(0.46, 0.18, 0.54, 0.18)                      # handle
+        p.drawRoundedRect(QRectF(s * 0.30, s * 0.30, s * 0.40, s * 0.50),
+                          3, 3)                           # bin
+        line(0.42, 0.40, 0.42, 0.68)
+        line(0.50, 0.40, 0.50, 0.68)
+        line(0.58, 0.40, 0.58, 0.68)
     p.end()
     return QIcon(pm)
 

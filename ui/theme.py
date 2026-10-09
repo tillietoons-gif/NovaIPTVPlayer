@@ -259,6 +259,18 @@ QPushButton#outlineBtn {{
 QPushButton#outlineBtn:hover {{
     border-color: {c["accent"]};
 }}
+QPushButton#dangerBtn {{
+    background: transparent;
+    color: {c["red"]};
+    border: 1px solid {c["red"]};
+    border-radius: 10px;
+    padding: 9px 20px;
+    font-size: 10pt;
+}}
+QPushButton#dangerBtn:hover {{
+    background: {c["red"]};
+    color: white;
+}}
 QPushButton#ctlBtn {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};

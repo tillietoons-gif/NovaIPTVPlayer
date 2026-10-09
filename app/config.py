@@ -31,6 +31,12 @@ class AppConfig:
     def epg_source(self, value: str) -> None:
         self._s.setValue("epg/source", value)
 
+    def clear_playlist(self) -> None:
+        """Forget the configured playlist and its guide."""
+        self._s.remove("playlist/source")
+        self._s.remove("epg/source")
+        self.sync()
+
     # -- playback ---------------------------------------------------------
     @property
     def volume(self) -> int:
