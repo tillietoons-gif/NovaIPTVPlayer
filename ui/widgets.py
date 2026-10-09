@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import requests
-from PySide6.QtCore import Qt, Signal, QRunnable, QThreadPool, QObject
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtCore import Qt, Signal, QRunnable, QThreadPool, QObject, Slot
+from PySide6.QtGui import QPixmap, QImage, QPainter, QColor
 from PySide6.QtWidgets import (
     QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QGridLayout, QScrollArea, QWidget, QLineEdit, QSizePolicy,
@@ -201,6 +201,50 @@ class SearchBar(QLineEdit):
         self.setObjectName("searchBar")
         self.setPlaceholderText("🔍  Search channels…")
         self.setClearButtonEnabled(True)
+
+
+# -- video display ---------------------------------------------------------------
+
+class VideoWidget(QWidget):
+    """Displays decoded video frames from the player engine.
+
+    Frames arrive via the ``set_frame`` slot (emitted from the decode
+    thread -- Qt queues the call into the GUI thread automatically).
+    Each frame is painted aspect-fit and centered on a black background;
+    before the first frame (or after ``clear()``) a "No signal"
+    placeholder is shown instead.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("videoFrame")
+        self.setMinimumHeight(300)
+        self._pixmap: QPixmap | None = None
+
+    @Slot(QImage)
+    def set_frame(self, img: QImage) -> None:
+        if img.isNull():
+            return
+        self._pixmap = QPixmap.fromImage(img)
+        self.update()  # schedule a repaint in the GUI thread
+
+    def clear(self) -> None:
+        """Forget the last frame and show the placeholder again."""
+        self._pixmap = None
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.black)
+        if self._pixmap is not None and not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        else:
+            painter.setPen(QColor("#8b95a9"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "No signal")
 
 
 # -- EPG timeline ---------------------------------------------------------------

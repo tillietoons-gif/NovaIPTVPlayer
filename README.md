@@ -1,8 +1,9 @@
 # ⚡ Nova IPTV Player
 
 An advanced IPTV player for **Windows and Linux** with a modern dark UI, built with
-**PySide6 (Qt6)** and **python-vlc** (VLC backend — best for HLS / DASH / RTSP
-streams).
+**PySide6 (Qt6)** and a **self-contained player engine** — it decodes HLS / DASH /
+RTSP / MP4 with bundled FFmpeg via PyAV, so there is **nothing else to install**
+(no VLC, no system FFmpeg).
 
 Features:
 
@@ -14,57 +15,49 @@ Features:
 - 🔊 Volume slider, mute, pause/resume, stop, fullscreen video
 - 🌙 Dark glassy theme with `#00d4ff` accent, async logo loading
 
+## ⬇️ Download (Windows)
+
+Every push to `main` builds a portable Windows app via GitHub Actions —
+grab `NovaIPTVPlayer-windows.zip` from the latest
+[Actions run](../../actions/workflows/build-windows.yml)
+(under *Artifacts*). Pushing a tag like `v1.0.0` also attaches the zip to a
+GitHub Release automatically. Just unzip and run `NovaIPTVPlayer.exe`
+(no install needed — the FFmpeg decoder is bundled inside).
+
 ## Requirements
 
 | # | Requirement | Windows | Linux |
 |---|-------------|---------|-------|
 | 1 | OS 64-bit | Windows 10/11 | Ubuntu 22.04+ / Fedora / Arch (any modern distro) |
-| 2 | Python 3.10+ 64-bit | Must match VLC bitness | From distro or python.org |
-| 3 | VLC 64-bit | Install from [videolan.org](https://www.videolan.org/vlc/) | `sudo apt install vlc` (Debian/Ubuntu) or `sudo dnf install vlc` (Fedora) |
-| 4 | libvlc discoverable | python-vlc finds it via VLC install folder | python-vlc finds it via system libvlc |
+| 2 | Python 3.10+ 64-bit | From python.org or the Microsoft Store | From distro or python.org |
 
-> ⚠️ If `import vlc` fails on Windows, 99% of the time it's a **32-bit vs 64-bit mismatch**
-> between Python and VLC. Install 64-bit everything. On Linux, make sure the
-> `vlc` package is installed, not just `libvlc`.
+That's it — video/audio decoding ships inside the `av` (PyAV) pip wheel,
+which bundles the FFmpeg libraries. No VLC, no system FFmpeg, no codec packs.
 
 ## Setup (Windows)
 
 ```powershell
-# 1. Install VLC 64-bit from https://www.videolan.org/vlc/
-
-# 2. Install dependencies
+# 1. Install dependencies
 cd iptv-player
 pip install -r requirements.txt
 
-# 3. Run
+# 2. Run
 python main.py
 ```
 
 ## Setup (Linux)
 
 ```bash
-# 1. Install VLC + Python dev tools (Debian/Ubuntu example)
+# 1. Install dependencies (Debian/Ubuntu example)
 sudo apt update
-sudo apt install vlc python3-pip
-
-# Fedora:
-# sudo dnf install vlc python3-pip
-# Arch:
-# sudo pacman -S vlc
-
-# 2. Install dependencies
-cd iptv-player
+sudo apt install python3-pip
 pip install -r requirements.txt
 
-# 3. Run
+# 2. Run
 python3 main.py
 # or use the helper script:
 # ./run.sh
 ```
-
-> 🐧 **Wayland note:** VLC video embedding works best under XWayland. If you get
-> a black video on Wayland, run with `QT_QPA_PLATFORM=xcb python3 main.py`
-> to force X11 mode.
 
 ## Usage
 
@@ -104,7 +97,8 @@ iptv-player/
 │   ├── models.py         # Channel / EPGProgram dataclasses
 │   ├── playlist.py       # M3U parser (EXTINF attrs), file+URL loading, filters
 │   ├── epg.py            # XMLTV parser (xmltodict), now/next + guide queries
-│   ├── player.py         # python-vlc controller (set_hwnd on Windows, set_xwindow on Linux)
+│   ├── player.py         # self-contained engine: PyAV (FFmpeg) decode in a
+│   │                       # QThread, QAudioSink audio, frame_ready(QImage) video
 │   └── favorites.py      # JSON favorites store
 └── ui/
     ├── theme.py          # dark QSS theme, accent #00d4ff
@@ -115,9 +109,15 @@ iptv-player/
 
 ## Troubleshooting
 
-- **Black video / nothing plays (Windows)** → install VLC 64-bit, restart the app. Check the stream URL works in VLC itself.
-- **Black video (Linux/Wayland)** → run with `QT_QPA_PLATFORM=xcb python3 main.py`.
-- **`import vlc` fails (Linux)** → `sudo apt install vlc` and retry; python-vlc needs system libvlc.
+- **Black video / nothing plays** → check the stream URL works in a browser or
+  another player; some providers expire tokens hourly or geo-block streams.
+- **`import av` fails** → run `pip install "av>=11"` and retry. PyAV wheels
+  bundle FFmpeg, so no system packages are needed.
+- **No audio but video works** → the stream may have no audio track, or the
+  audio codec isn't in the bundled FFmpeg build. Try another channel to compare.
+- **Choppy playback** → late video frames are dropped automatically to stay in
+  sync; persistent choppiness usually means a slow network or an overloaded
+  provider server.
 - **Playlist fails to load** → check the URL in a browser; some providers expire tokens hourly.
 - **No EPG data** → make sure the XMLTV URL matches your provider and channel `tvg-id`s line up.
 - **Logos missing** → the app shows a 📺 placeholder when a logo URL is empty or unreachable.

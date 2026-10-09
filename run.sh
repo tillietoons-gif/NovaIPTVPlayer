@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
-# Nova IPTV Player - Linux launcher
-# Falls back to X11 (xcb) on Wayland for reliable VLC video embedding.
+# Nova IPTV Player - Linux launcher.
+# The player engine is self-contained (PyAV bundles FFmpeg), so no
+# system media packages are required -- just Python and pip deps.
 set -e
 cd "$(dirname "$0")"
 
-if [ -z "$QT_QPA_PLATFORM" ] && [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-  echo "Wayland detected -> using QT_QPA_PLATFORM=xcb for VLC embedding"
-  export QT_QPA_PLATFORM=xcb
-fi
-
-if ! python3 -c "import vlc" 2>/dev/null; then
-  echo "WARNING: python-vlc cannot find libvlc. Install VLC first:"
-  echo "  Ubuntu/Debian: sudo apt install vlc"
-  echo "  Fedora:        sudo dnf install vlc"
-  echo "  Arch:          sudo pacman -S vlc"
+if ! python3 -c "import av" 2>/dev/null; then
+  echo "WARNING: PyAV is not installed. Install dependencies first:"
+  echo "  pip install -r requirements.txt"
 fi
 
 exec python3 main.py "$@"

@@ -95,8 +95,8 @@ class SettingsDialog(QDialog):
         lay.addLayout(form)
 
         note = QLabel(
-            "Tip: VLC 64-bit must be installed on Windows for playback.\n"
-            "python-vlc uses the VLC libraries from the install folder."
+            "Tip: playback uses the built-in engine (bundled FFmpeg via PyAV)\n"
+            "— nothing extra to install for video and audio."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#8b95a9; font-size:11px;")

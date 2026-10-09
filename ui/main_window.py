@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QStackedWidget, QLabel, QFrame, QSlider, QComboBox, QSplitter,
+    QStackedWidget, QLabel, QSlider, QComboBox, QSplitter,
     QMessageBox, QStatusBar, QListWidget, QListWidgetItem, QProgressBar,
 )
 
@@ -16,12 +16,12 @@ from app.config import AppConfig
 from app.epg import EPGManager
 from app.favorites import FavoritesStore
 from app.models import Channel
-from app.player import VlcPlayer
+from app.player import Player
 from app.playlist import (
     load_playlist, categories, filter_channels,
 )
 from ui.dialogs import AddPlaylistDialog, SettingsDialog
-from ui.widgets import ChannelGrid, SearchBar, EpgTimelineWidget
+from ui.widgets import ChannelGrid, SearchBar, EpgTimelineWidget, VideoWidget
 
 
 # -- background loaders (Qt threads, not asyncio: simpler on Windows) --------
@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
         self.config = AppConfig()
         self.favorites = FavoritesStore()
         self.epg = EPGManager()
-        self.player = VlcPlayer(self)
+        self.player = Player(self)
 
         self.channels: list[Channel] = []
         self.history: list[tuple[str, str]] = []  # (name, url)
@@ -101,13 +101,13 @@ class MainWindow(QMainWindow):
             self._load_playlist(self.config.playlist_source, silent=True)
         if self.config.epg_source:
             self._load_epg(self.config.epg_source, silent=True)
-        if not VlcPlayer.is_available():
-            err = VlcPlayer.import_error()
+        if not Player.is_available():
+            err = Player.import_error()
             QMessageBox.warning(
-                self, "VLC not found",
-                "python-vlc could not load libvlc.\n\n"
-                "On Windows, install VLC 64-bit from videolan.org "
-                "(matching your Python bitness) and restart.\n\n"
+                self, "Player engine missing",
+                "PyAV (the bundled FFmpeg decoder) could not be loaded.\n\n"
+                "Install it with:  pip install av\n"
+                "Then restart the app.\n\n"
                 f"Details: {err}",
             )
 
@@ -227,9 +227,7 @@ class MainWindow(QMainWindow):
         blay.setSpacing(6)
 
         info = QHBoxLayout()
-        self.video_frame = QFrame()
-        self.video_frame.setObjectName("videoFrame")
-        self.video_frame.setMinimumHeight(300)
+        self.video_frame = VideoWidget()
         blay.addWidget(self.video_frame, 1)
 
         self.now_playing = QLabel("Nothing playing")
@@ -283,10 +281,12 @@ class MainWindow(QMainWindow):
 
     def _connect_player(self) -> None:
         self.player.state_changed.connect(self._on_player_state)
+        # Decoded frames go straight to the video widget (thread-safe:
+        # Qt queues the cross-thread signal into the GUI thread).
+        self.player.frame_ready.connect(self.video_frame.set_frame)
         self.player.set_mute(self.config.muted)
         self.player.set_volume(self.config.volume)
-        # Attach once the video widget has a real window handle.
-        QTimer.singleShot(300, lambda: self.player.attach(self.video_frame))
+        self.player.attach(self.video_frame)
 
     # -- navigation -----------------------------------------------------------
     def _navigate(self, key: str) -> None:
@@ -472,10 +472,9 @@ class MainWindow(QMainWindow):
             self.video_frame.setWindowFlags(Qt.Widget)
             self.video_frame.showNormal()
         else:
-            # Re-attach after going fullscreen: the native handle changes.
+            # No native re-attach needed: frames are painted by Qt itself.
             self.video_frame.setWindowFlags(Qt.Window)
             self.video_frame.showFullScreen()
-            QTimer.singleShot(200, lambda: self.player.attach(self.video_frame))
 
     def _on_volume(self, value: int) -> None:
         self.player.set_volume(value)
@@ -498,8 +497,9 @@ class MainWindow(QMainWindow):
                 6000)
             QMessageBox.warning(
                 self, "Playback error",
-                "VLC could not play this stream.\n"
-                "It may be offline, geo-blocked, or the playlist URL expired.")
+                "The built-in player could not play this stream.\n"
+                "It may be offline, geo-blocked, use an unsupported codec, "
+                "or the playlist URL expired.")
         self.statusBar().showMessage(f"Player: {state}", 3000)
 
     def _open_settings(self) -> None:
