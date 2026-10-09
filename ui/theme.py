@@ -403,12 +403,25 @@ QPushButton#ctlBtn:hover {{
 QPushButton#transportBtn {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
-    border-radius: 19px;
-    padding: 8px;
+    border-radius: 16px;
+    padding: 6px;
 }}
 QPushButton#transportBtn:hover {{
     border-color: {c["accent"]};
     background: {c["card_hover"]};
+}}
+QPushButton#transportHeroBtn {{
+    background: {GRADIENT};
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 22px;
+    padding: 6px;
+}}
+QPushButton#transportHeroBtn:hover {{
+    background: {c["accent_light"]};
+    border-color: white;
+}}
+QPushButton#transportHeroBtn:pressed {{
+    background: {c["accent2"]};
 }}
 
 /* ================= sections / lists ================= */

@@ -1370,6 +1370,8 @@ NAV_ITEMS = [
     ("playlists", "Providers", "list"),
 ]
 
+MEDIA_PAGES = tuple(k for k, _label, _icon in NAV_ITEMS)
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -1879,7 +1881,7 @@ class MainWindow(QMainWindow):
             self.np_time_now.setText("0:00")
             self.np_time_dur.setText("0:00")
             self.np_slider.setValue(0)
-        self.pp_btn.setIcon(make_icon("play", 18))
+        self.pp_btn.setIcon(make_icon("play", 20, "white"))
         self._hide_account_banner()
         self._close_series_detail()
         self._update_now_next()
@@ -2003,7 +2005,7 @@ class MainWindow(QMainWindow):
         self._update_panel_visibility()
 
     def _update_panel_visibility(self) -> None:
-        show = self._current_page in ("home", "live")
+        show = self._current_page in MEDIA_PAGES
         if self._panel_mode == "docked":
             self.right_panel.setVisible(show)
         elif not show:
@@ -2012,7 +2014,7 @@ class MainWindow(QMainWindow):
 
     def _update_fab_visibility(self) -> None:
         show = (self._panel_mode == "drawer"
-                and self._current_page in ("home", "live"))
+                and self._current_page in MEDIA_PAGES)
         self._fab.setVisible(show)
         if show:
             self._layout_overlays()
@@ -2969,9 +2971,9 @@ class MainWindow(QMainWindow):
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("rightPanel")
-        panel.setFixedWidth(292)
+        panel.setFixedWidth(296)
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(16, 18, 16, 16)
+        lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(10)
 
         np_head = QHBoxLayout()
@@ -2984,13 +2986,12 @@ class MainWindow(QMainWindow):
         np_head.addWidget(self.np_visualizer)
         lay.addLayout(np_head)
 
-
         card = QFrame()
         card.setObjectName("sideCard")
         cl = QVBoxLayout(card)
         cl.setContentsMargins(12, 12, 12, 12)
         cl.setSpacing(8)
-        self.thumb_video = VideoWidget(placeholder="Select a channel to play")
+        self.thumb_video = VideoWidget(placeholder="Select a stream to play")
         self.thumb_video.setFixedHeight(150)
         self.thumb_video.mouseDoubleClickEvent = lambda _e: self._toggle_fullscreen()
         self.thumb_video.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3038,36 +3039,56 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.rec_label)
         lay.addWidget(card)
 
+        # Primary transport row (Prev, Play/Pause Hero, Next, Fullscreen)
         transport = QHBoxLayout()
-        transport.setSpacing(6)
-        self.prev_btn = self._tbtn("prev", self._play_prev)
-        self.pp_btn = self._tbtn("play", self._toggle_pause)
-        self.next_btn = self._tbtn("next", self._play_next)
-        self.rec_btn = self._tbtn("rec", self._toggle_record)
-        self.rec_btn.setIcon(make_icon("rec", 14, COLORS["red"]))
-        self.rec_btn.setToolTip("Record")
-        self.rec_btn.setEnabled(False)
-        self.aspect_btn = self._tbtn("aspect", self._on_toggle_aspect)
-        self.aspect_btn.setToolTip("Aspect Ratio (Auto / 16:9 / 4:3 / Fill) (A)")
-        self.tracks_btn = self._tbtn("subtitle", self._show_tracks_menu)
-        self.tracks_btn.setToolTip("Audio & Subtitle Tracks (C / S)")
-        self.ext_btn = self._tbtn("external", self._on_launch_external)
-        self.ext_btn.setToolTip("Play in External Player (VLC / MPV) (E)")
-        self.pip_btn = self._tbtn("pip", self._toggle_pip)
-        self.pip_btn.setToolTip("Picture-in-Picture (P)")
-        self.fs_btn = self._tbtn("expand", self._toggle_fullscreen)
+        transport.setSpacing(10)
+        transport.setAlignment(Qt.AlignCenter)
+        self.prev_btn = self._tbtn("prev", self._play_prev, size=36)
+        self.prev_btn.setToolTip("Previous Channel / Track (Left Arrow)")
+        self.pp_btn = self._tbtn("play", self._toggle_pause, size=44, primary=True)
+        self.pp_btn.setToolTip("Play / Pause (Space)")
+        self.next_btn = self._tbtn("next", self._play_next, size=36)
+        self.next_btn.setToolTip("Next Channel / Track (Right Arrow)")
+        self.fs_btn = self._tbtn("expand", self._toggle_fullscreen, size=36)
         self.fs_btn.setToolTip("Fullscreen (F)")
-        for b in (self.prev_btn, self.pp_btn, self.next_btn, self.rec_btn,
-                  self.aspect_btn, self.tracks_btn, self.ext_btn, self.pip_btn):
-            transport.addWidget(b)
-        transport.addStretch(1)
+
+        transport.addWidget(self.prev_btn)
+        transport.addWidget(self.pp_btn)
+        transport.addWidget(self.next_btn)
         transport.addWidget(self.fs_btn)
         lay.addLayout(transport)
 
+        # Secondary utility tools row (PiP, Aspect Ratio, Audio/Subtitles, External, Record)
+        util_row = QHBoxLayout()
+        util_row.setSpacing(6)
+        util_row.setAlignment(Qt.AlignCenter)
+
+        self.pip_btn = self._tbtn("pip", self._toggle_pip, size=32)
+        self.pip_btn.setToolTip("Picture-in-Picture (P)")
+        self.aspect_btn = self._tbtn("aspect", self._on_toggle_aspect, size=32)
+        self.aspect_btn.setToolTip("Aspect Ratio (Auto / 16:9 / 4:3 / Fill) (A)")
+        self.tracks_btn = self._tbtn("subtitle", self._show_tracks_menu, size=32)
+        self.tracks_btn.setToolTip("Audio & Subtitle Tracks (C / S)")
+        self.ext_btn = self._tbtn("external", self._on_launch_external, size=32)
+        self.ext_btn.setToolTip("Play in External Player (VLC / MPV) (E)")
+        self.rec_btn = self._tbtn("rec", self._toggle_record, size=32)
+        self.rec_btn.setIcon(make_icon("rec", 14, COLORS["red"]))
+        self.rec_btn.setToolTip("Record Live Stream")
+        self.rec_btn.setEnabled(False)
+
+        util_row.addWidget(self.pip_btn)
+        util_row.addWidget(self.aspect_btn)
+        util_row.addWidget(self.tracks_btn)
+        util_row.addWidget(self.ext_btn)
+        util_row.addWidget(self.rec_btn)
+        lay.addLayout(util_row)
+
+        # Volume row
         vol_row = QHBoxLayout()
+        vol_row.setSpacing(8)
         self.mute_btn = IconButton("volume", 18)
         self.mute_btn.setIcon(make_icon("volume", 18, COLORS["muted"]))
-        self.mute_btn.setToolTip("Mute")
+        self.mute_btn.setToolTip("Mute (M)")
         self.mute_btn.clicked.connect(self._toggle_mute)
         vol_row.addWidget(self.mute_btn)
         self.vol = QSlider(Qt.Horizontal)
@@ -3077,50 +3098,59 @@ class MainWindow(QMainWindow):
         vol_row.addWidget(self.vol, 1)
         lay.addLayout(vol_row)
 
+        # Stream / EPG / VOD Info Card
+        info_card = QFrame()
+        info_card.setObjectName("sideCard")
+        icl = QVBoxLayout(info_card)
+        icl.setContentsMargins(12, 10, 12, 10)
+        icl.setSpacing(6)
+
         epg_head = QHBoxLayout()
-        epg_head.addWidget(QLabel("EPG"))
+        self.epg_title_lbl = QLabel("Live Guide")
+        self.epg_title_lbl.setObjectName("sideTitle")
+        epg_head.addWidget(self.epg_title_lbl)
         epg_head.addStretch(1)
         self.epg_times = QLabel("")
         self.epg_times.setObjectName("upTime")
         epg_head.addWidget(self.epg_times)
-        lay.addLayout(epg_head)
+        icl.addLayout(epg_head)
+
         self.epg_now = QLabel("No programme data")
         self.epg_now.setObjectName("upTitle")
         self.epg_now.setWordWrap(True)
-        lay.addWidget(self.epg_now)
+        icl.addWidget(self.epg_now)
+
         self.epg_bar = QProgressBar()
         self.epg_bar.setObjectName("epgProgress")
         self.epg_bar.setRange(0, 100)
         self.epg_bar.setTextVisible(False)
-        self.epg_bar.setFixedHeight(8)
-        lay.addWidget(self.epg_bar)
+        self.epg_bar.setFixedHeight(6)
+        icl.addWidget(self.epg_bar)
+
         self.epg_next = QLabel("")
         self.epg_next.setObjectName("upChannel")
         self.epg_next.setWordWrap(True)
-        lay.addWidget(self.epg_next)
+        icl.addWidget(self.epg_next)
 
-        up_t = QLabel("Upcoming program")
-        up_t.setObjectName("sideTitle")
-        lay.addWidget(up_t)
-        self.upcoming_box = QVBoxLayout()
-        self.upcoming_box.setSpacing(6)
-        lay.addLayout(self.upcoming_box)
+        lay.addWidget(info_card)
 
-        fav_t = QLabel("Favorite channels")
-        fav_t.setObjectName("sideTitle")
-        lay.addWidget(fav_t)
+        # Off-layout background containers for backwards compatibility
+        self._hidden_box_container = QWidget()
+        self.upcoming_box = QVBoxLayout(self._hidden_box_container)
         self.fav_box = QVBoxLayout()
-        self.fav_box.setSpacing(6)
-        lay.addLayout(self.fav_box)
 
         lay.addStretch(1)
         return panel
 
-    def _tbtn(self, icon: str, slot) -> QPushButton:
+    def _tbtn(self, icon: str, slot, size: int = 38, primary: bool = False) -> QPushButton:
         b = QPushButton()
-        b.setObjectName("transportBtn")
-        b.setIcon(make_icon(icon, 18))
-        b.setFixedSize(38, 38)
+        if primary:
+            b.setObjectName("transportHeroBtn")
+            b.setIcon(make_icon(icon, 20, "white"))
+        else:
+            b.setObjectName("transportBtn")
+            b.setIcon(make_icon(icon, 16 if size <= 34 else 18))
+        b.setFixedSize(size, size)
         b.setCursor(Qt.PointingHandCursor)
         b.clicked.connect(slot)
         return b
@@ -4224,12 +4254,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "np_visualizer"):
             self.np_visualizer.set_active(state == "playing")
         if state == "playing":
-            self.pp_btn.setIcon(make_icon("pause", 18))
+            self.pp_btn.setIcon(make_icon("pause", 20, "white"))
 
         elif state == "paused":
-            self.pp_btn.setIcon(make_icon("play", 18))
+            self.pp_btn.setIcon(make_icon("play", 20, "white"))
         elif state in ("stopped", "error"):
-            self.pp_btn.setIcon(make_icon("play", 18))
+            self.pp_btn.setIcon(make_icon("play", 20, "white"))
             if hasattr(self, "np_seek_row"):
                 self.np_seek_row.hide()
                 self.np_time_now.setText("0:00")
@@ -4267,25 +4297,65 @@ class MainWindow(QMainWindow):
     # -- now playing panel ----------------------------------------------------------
     def _update_now_next(self) -> None:
         ch = self._current_channel
-        if ch is None or not self.epg.loaded:
+        if ch is None:
+            if hasattr(self, "epg_title_lbl"):
+                self.epg_title_lbl.setText("Live Guide")
             self.epg_now.setText("No programme data")
             self.epg_next.setText("")
             self.epg_times.setText("")
             self.epg_bar.setValue(0)
+            self.epg_bar.hide()
             self.upcoming_box_update(None)
             return
+
+        if ch.kind in ("movie", "series"):
+            if hasattr(self, "epg_title_lbl"):
+                self.epg_title_lbl.setText("Synopsis" if ch.plot else "Overview")
+            meta_parts = []
+            if ch.kind == "series" and ch.season and ch.episode_num:
+                meta_parts.append(f"S{ch.season}:E{ch.episode_num}")
+            if ch.year:
+                meta_parts.append(str(ch.year))
+            if ch.rating:
+                meta_parts.append(f"★ {ch.rating}")
+            if ch.genre:
+                meta_parts.append(ch.genre)
+            self.epg_times.setText(" • ".join(meta_parts[:2]))
+
+            plot_text = ch.plot.strip() if ch.plot else ""
+            if not plot_text:
+                plot_text = f"{ch.display_group}  •  {ch.kind.title()}"
+            self.epg_now.setText(plot_text)
+            self.epg_bar.hide()
+            self.epg_next.setText(f"Genre: {ch.genre}" if ch.genre and ch.plot else "")
+            self.upcoming_box_update(None)
+            return
+
+        if hasattr(self, "epg_title_lbl"):
+            self.epg_title_lbl.setText("Live Guide")
+
+        if not self.epg.loaded:
+            self.epg_now.setText("No programme data")
+            self.epg_next.setText("")
+            self.epg_times.setText("")
+            self.epg_bar.setValue(0)
+            self.epg_bar.hide()
+            self.upcoming_box_update(None)
+            return
+
         now, nxt = self.epg.now_and_next(ch.tvg_id, ch.name)
         if now:
             self.epg_now.setText(now.title)
             total = (now.stop - now.start).total_seconds()
             elapsed = (datetime.now(timezone.utc) - now.start).total_seconds()
             pct = max(0, min(100, int(elapsed / total * 100))) if total > 0 else 0
+            self.epg_bar.show()
             self.epg_bar.setValue(pct)
             self.epg_times.setText(
                 f"{now.start.strftime('%H:%M')} – {now.stop.strftime('%H:%M')}")
         else:
             self.epg_now.setText("No programme data")
-            self.epg_bar.setValue(0)
+            self.epg_bar.hide()
             self.epg_times.setText("")
         if nxt:
             self.epg_next.setText(

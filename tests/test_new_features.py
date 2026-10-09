@@ -221,4 +221,120 @@ class TestNewFeatures(unittest.TestCase):
         icon = make_icon("sidebar", 20, "white")
         self.assertFalse(icon.isNull())
 
+    def test_media_pages_includes_movies_and_series(self) -> None:
+        from ui.main_window import MEDIA_PAGES
+        for expected in ("movie", "series", "live", "home", "guide", "catchup", "favorites", "history", "playlists"):
+            self.assertIn(expected, MEDIA_PAGES)
+
+    def test_panel_and_fab_visibility_logic(self) -> None:
+        from ui.main_window import MainWindow
+
+        class DummyWindow:
+            def __init__(self):
+                self._current_page = "movie"
+                self._panel_mode = "docked"
+                self.right_panel = MagicMock()
+                self._drawer = MagicMock()
+                self._fab = MagicMock()
+
+            def _layout_overlays(self):
+                pass
+
+            def _update_fab_visibility(self):
+                MainWindow._update_fab_visibility(self)
+
+        dummy = DummyWindow()
+
+        # Check docked mode visibility on media pages
+        for page in ("movie", "series", "guide", "catchup", "favorites", "history", "playlists"):
+            dummy._current_page = page
+            MainWindow._update_panel_visibility(dummy)
+            dummy.right_panel.setVisible.assert_called_with(True)
+
+        # Check drawer mode FAB visibility on media pages
+        dummy._panel_mode = "drawer"
+        for page in ("movie", "series", "live"):
+            dummy._current_page = page
+            MainWindow._update_fab_visibility(dummy)
+            dummy._fab.setVisible.assert_called_with(True)
+
+    def test_right_panel_and_vod_synopsis_display(self) -> None:
+        from PySide6.QtWidgets import QWidget
+        from ui.main_window import MainWindow
+        from app.models import Channel
+        from app.epg import EPGManager
+
+        class DummyWindow(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.config = AppConfig()
+                self.epg = EPGManager()
+                self._current_channel = None
+                self._play_prev = MagicMock()
+                self._toggle_pause = MagicMock()
+                self._play_next = MagicMock()
+                self._toggle_record = MagicMock()
+                self._on_toggle_aspect = MagicMock()
+                self._show_tracks_menu = MagicMock()
+                self._on_launch_external = MagicMock()
+                self._toggle_pip = MagicMock()
+                self._toggle_fullscreen = MagicMock()
+                self._show_video_context_menu = MagicMock()
+                self._on_np_slider_pressed = MagicMock()
+                self._on_np_slider_released = MagicMock()
+                self._on_np_slider_moved = MagicMock()
+                self._toggle_mute = MagicMock()
+                self._on_volume = MagicMock()
+                self._tbtn = lambda *args, **kwargs: MainWindow._tbtn(self, *args, **kwargs)
+                self.upcoming_box_update = MagicMock()
+                self.panel = MainWindow._build_right_panel(self)
+
+        win = DummyWindow()
+        # Verify streamlined transport and utility controls
+        self.assertEqual(win.pp_btn.objectName(), "transportHeroBtn")
+        self.assertIsNotNone(win.prev_btn)
+        self.assertIsNotNone(win.next_btn)
+        self.assertIsNotNone(win.fs_btn)
+        self.assertIsNotNone(win.pip_btn)
+        self.assertIsNotNone(win.aspect_btn)
+        self.assertIsNotNone(win.tracks_btn)
+        self.assertIsNotNone(win.ext_btn)
+        self.assertIsNotNone(win.rec_btn)
+        self.assertIsNotNone(win.upcoming_box)
+        self.assertIsNotNone(win.fav_box)
+
+        # Test movie synopsis display in _update_now_next
+        movie_ch = Channel(
+            name="Inception",
+            url="http://stream/movie.mp4",
+            kind="movie",
+            group="Sci-Fi",
+            plot="A thief who steals corporate secrets through dream-sharing technology.",
+            year="2010",
+            rating="8.8"
+        )
+        win._current_channel = movie_ch
+        MainWindow._update_now_next(win)
+        self.assertEqual(win.epg_title_lbl.text(), "Synopsis")
+        self.assertIn("A thief who steals", win.epg_now.text())
+        self.assertFalse(win.epg_bar.isVisible())
+
+        # Test series episode in _update_now_next
+        series_ch = Channel(
+            name="Breaking Bad S01E01",
+            url="http://stream/series.mp4",
+            kind="series",
+            group="Drama",
+            plot="A chemistry teacher diagnosed with cancer turns to cooking meth.",
+            season="1",
+            episode_num="1",
+            rating="9.5"
+        )
+        win._current_channel = series_ch
+        MainWindow._update_now_next(win)
+        self.assertEqual(win.epg_title_lbl.text(), "Synopsis")
+        self.assertIn("S1:E1", win.epg_times.text())
+        self.assertIn("A chemistry teacher", win.epg_now.text())
+        self.assertFalse(win.epg_bar.isVisible())
+
 
