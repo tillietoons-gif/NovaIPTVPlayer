@@ -89,8 +89,10 @@ class SettingsDialog(QDialog):
         ("M", "Mute / unmute"),
         ("Left / Right", "Previous / next channel"),
         ("Ctrl+K / /", "Quick spotlight search"),
+        ("[", "Toggle sidebar collapse"),
         ("Esc", "Close panel or dialog"),
     ]
+
 
 
     def __init__(self, config, parent=None, parental=None, groups=None) -> None:
@@ -401,8 +403,10 @@ class ShortcutsDialog(QDialog):
             ("↑ / ↓", "Volume up / down (±5%)"),
             ("← / →", "Prev / Next channel (or Seek ±10s in VOD)"),
             ("Ctrl+K / /", "Quick spotlight search"),
+            ("[", "Toggle sidebar collapse / icon rail"),
             ("Esc", "Exit Fullscreen / Close drawer / Cancel"),
             ("? / F1", "Show this shortcuts help dialog"),
+
 
         ]
 

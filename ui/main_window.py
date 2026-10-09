@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
     QStackedWidget, QLabel, QSlider, QComboBox, QMessageBox,
     QScrollArea, QDialog, QDialogButtonBox, QMenu, QFormLayout,
     QLineEdit, QAbstractButton, QGraphicsOpacityEffect, QProgressBar,
+    QSplitter, QSplitterHandle,
 )
+
 
 from app import __app_name__, __version__
 from app.config import AppConfig
@@ -197,7 +199,38 @@ class _VodInfoLoader(QThread):
 
 # -- small helpers ---------------------------------------------------------------
 
+class _SidebarSplitterHandle(QSplitterHandle):
+    def __init__(self, orientation: Qt.Orientation, parent: _SidebarSplitter) -> None:
+        super().__init__(orientation, parent)
+        self.setCursor(Qt.SplitHCursor)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            splitter = self.splitter()
+            if hasattr(splitter, "toggle_collapse"):
+                splitter.toggle_collapse()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+
+class _SidebarSplitter(QSplitter):
+    collapse_toggled = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(Qt.Horizontal, parent)
+        self.setObjectName("mainSplitter")
+        self.setChildrenCollapsible(False)
+
+    def createHandle(self) -> QSplitterHandle:  # noqa: N802
+        return _SidebarSplitterHandle(self.orientation(), self)
+
+    def toggle_collapse(self) -> None:
+        self.collapse_toggled.emit()
+
+
 class _TitleBar(QWidget):
+
     """Drag region for the frameless window."""
 
     def __init__(self, parent=None) -> None:
@@ -1463,27 +1496,41 @@ class MainWindow(QMainWindow):
         mid.setSpacing(0)
         self._mid_lay = mid
         self._sidebar = self._build_sidebar()
-        mid.addWidget(self._sidebar)
 
-        content = QVBoxLayout()
-        content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(0)
+        self._content_wrap = QWidget()
+        self._content_wrap.setObjectName("contentWrap")
+        content_lay = QVBoxLayout(self._content_wrap)
+        content_lay.setContentsMargins(0, 0, 0, 0)
+        content_lay.setSpacing(0)
         self._account_banner = self._build_account_banner()
         self._account_banner.hide()
-        content.addWidget(self._account_banner)
+        content_lay.addWidget(self._account_banner)
         self.stack = QStackedWidget()
         self._pages: dict[str, QWidget] = {}
         for key, _label, _icon in NAV_ITEMS:
             page = self._build_page(key)
             self._pages[key] = page
             self.stack.addWidget(page)
-        content.addWidget(self.stack, 1)
-        content.addWidget(self._build_statusbar())
-        mid.addLayout(content, 1)
+        content_lay.addWidget(self.stack, 1)
+        content_lay.addWidget(self._build_statusbar())
+
+        self._splitter = _SidebarSplitter(central)
+        self._splitter.addWidget(self._sidebar)
+        self._splitter.addWidget(self._content_wrap)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.collapse_toggled.connect(self._toggle_sidebar_compact)
+        self._splitter.splitterMoved.connect(self._on_sidebar_resized)
+
+        init_w = max(180, min(420, self.config.sidebar_width or 212))
+        self._splitter.setSizes([init_w, 1000])
+
+        mid.addWidget(self._splitter, 1)
 
         self.right_panel = self._build_right_panel()
         mid.addWidget(self.right_panel)
         root.addLayout(mid, 1)
+
 
         self._nav_btns["home"].setChecked(True)
 
@@ -1568,7 +1615,8 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
         side.setObjectName("sidebar")
-        side.setFixedWidth(212)
+        side.setMinimumWidth(64)
+        side.setMaximumWidth(420)
         lay = QVBoxLayout(side)
         lay.setContentsMargins(14, 16, 14, 12)
         lay.setSpacing(4)
@@ -1583,8 +1631,15 @@ class MainWindow(QMainWindow):
         self._brand_title = title
         brand.addWidget(title)
         brand.addStretch(1)
+
+        self.side_toggle_btn = IconButton("sidebar", 18)
+        self.side_toggle_btn.setToolTip("Collapse sidebar ([)")
+        self.side_toggle_btn.clicked.connect(self._toggle_sidebar_compact)
+        brand.addWidget(self.side_toggle_btn)
+
         lay.addLayout(brand)
         lay.addSpacing(10)
+
 
         # provider switcher (under the logo)
         self.provider_btn = QPushButton()
@@ -1868,8 +1923,9 @@ class MainWindow(QMainWindow):
 
     def _apply_breakpoints(self) -> None:
         w = self.width()
-        # sidebar: full labels vs icon rail
-        self._apply_sidebar_compact(w < 1280)
+        # sidebar: if window is very narrow (<1000px), automatically compact to preserve room
+        if w < 1000 and not self._sidebar_compact:
+            self._apply_sidebar_compact(True, update_splitter=True)
         # right panel: docked vs drawer
         mode = "docked" if w >= 1280 else "drawer"
         if mode != self._panel_mode:
@@ -1890,13 +1946,30 @@ class MainWindow(QMainWindow):
             self.search.setFixedWidth(260 if w < 1280 else 420)
         self._layout_overlays()
 
-    def _apply_sidebar_compact(self, compact: bool) -> None:
-        if compact == self._sidebar_compact:
+    def _toggle_sidebar_compact(self) -> None:
+        self._apply_sidebar_compact(not self._sidebar_compact, update_splitter=True)
+
+    def _on_sidebar_resized(self, pos: int, index: int) -> None:
+        if index != 1:
+            return
+        sizes = self._splitter.sizes()
+        if not sizes:
+            return
+        side_w = sizes[0]
+        if side_w < 115:
+            if not self._sidebar_compact:
+                self._apply_sidebar_compact(True, update_splitter=False)
+        else:
+            if self._sidebar_compact:
+                self._apply_sidebar_compact(False, update_splitter=False)
+            self.config.sidebar_width = side_w
+
+    def _apply_sidebar_compact(self, compact: bool, update_splitter: bool = True) -> None:
+        if compact == self._sidebar_compact and not update_splitter:
             return
         self._sidebar_compact = compact
         for btn in list(self._nav_btns.values()) + self._side_action_btns:
             btn.set_compact(compact)
-        self._sidebar.setFixedWidth(64 if compact else 212)
         lay = self._sidebar.layout()
         if compact:
             lay.setContentsMargins(9, 16, 9, 12)
@@ -1906,6 +1979,15 @@ class MainWindow(QMainWindow):
         self._user_name.setVisible(not compact)
         self._ver_label.setVisible(not compact)
         self.provider_btn.setVisible(not compact)
+        if hasattr(self, "side_toggle_btn"):
+            self.side_toggle_btn.setToolTip(
+                "Expand sidebar ([)" if compact else "Collapse sidebar ([)")
+        if update_splitter and hasattr(self, "_splitter"):
+            curr_sizes = self._splitter.sizes()
+            tot = sum(curr_sizes) or 1200
+            target_side = 64 if compact else max(180, min(380, self.config.sidebar_width or 212))
+            self._splitter.setSizes([target_side, max(100, tot - target_side)])
+
 
     # -- right panel: docked vs drawer --------------------------------------
     def _apply_panel_mode(self) -> None:
@@ -2045,8 +2127,11 @@ class MainWindow(QMainWindow):
             v = max(0, self.vol.value() - 5)
             self.vol.setValue(v)
             self._flash_status(f"Volume: {v}%", 1500)
+        elif key == Qt.Key_BracketLeft:
+            self._toggle_sidebar_compact()
         elif key in (Qt.Key_Question, Qt.Key_F1):
             self._show_shortcuts_dialog()
+
         else:
             handled = False
         if handled:

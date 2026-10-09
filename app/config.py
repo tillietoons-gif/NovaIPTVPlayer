@@ -66,5 +66,14 @@ class AppConfig:
     def window_geometry(self, value: bytes) -> None:
         self._s.setValue("ui/geometry", value)
 
+    @property
+    def sidebar_width(self) -> int:
+        return int(self._s.value("ui/sidebar_width", 212, type=int))
+
+    @sidebar_width.setter
+    def sidebar_width(self, value: int) -> None:
+        self._s.setValue("ui/sidebar_width", max(64, min(420, value)))
+
+
     def sync(self) -> None:
         self._s.sync()

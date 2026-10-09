@@ -602,7 +602,24 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
     background: none;
 }}
+
+/* ================= splitter ================= */
+QSplitter#mainSplitter {{
+    background: transparent;
+}}
+QSplitter#mainSplitter::handle {{
+    background: {c["border"]};
+    width: 3px;
+}}
+QSplitter#mainSplitter::handle:hover {{
+    background: {c["accent"]};
+}}
+QSplitter#mainSplitter::handle:pressed {{
+    background: {c["accent_light"]};
+}}
+
 QTabWidget::pane {{ border: none; }}
+
 QTabBar::tab {{
     background: {c["surface2"]};
     padding: 8px 18px;

@@ -11,13 +11,15 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
+from app.config import AppConfig
 from app.external_player import detect_players, launch_player
 from app.models import Channel
 from app.player import Player
 from app.xtream import XtreamClient
-from ui.main_window import _AutoPlayNextBanner, _PipWindow
+from ui.main_window import _AutoPlayNextBanner, _PipWindow, _SidebarSplitter
 from ui.theme import build_stylesheet, COLORS
 from ui.widgets import VideoWidget, make_icon, AudioVisualizer, HeroCard, quality_of
+
 
 
 
@@ -185,4 +187,38 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("#090b10", qss)
         self.assertIn("#8b5cf6", qss)
         self.assertIn("channelCard", qss)
+
+    def test_sidebar_width_config(self) -> None:
+        cfg = AppConfig()
+        orig = cfg.sidebar_width
+        try:
+            cfg.sidebar_width = 280
+            self.assertEqual(cfg.sidebar_width, 280)
+            # Clamping check: min 64, max 420
+            cfg.sidebar_width = 10
+            self.assertEqual(cfg.sidebar_width, 64)
+            cfg.sidebar_width = 800
+            self.assertEqual(cfg.sidebar_width, 420)
+        finally:
+            cfg.sidebar_width = orig
+
+    def test_sidebar_splitter_and_collapse_toggle(self) -> None:
+        splitter = _SidebarSplitter()
+        self.assertEqual(splitter.orientation(), Qt.Horizontal)
+        toggled = False
+        def on_toggle():
+            nonlocal toggled
+            toggled = True
+
+        splitter.collapse_toggled.connect(on_toggle)
+        splitter.toggle_collapse()
+        self.assertTrue(toggled)
+
+        handle = splitter.createHandle()
+        self.assertEqual(handle.cursor().shape(), Qt.SplitHCursor)
+
+    def test_sidebar_icon_registered(self) -> None:
+        icon = make_icon("sidebar", 20, "white")
+        self.assertFalse(icon.isNull())
+
 

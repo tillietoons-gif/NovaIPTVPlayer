@@ -311,8 +311,13 @@ def make_icon(name: str, size: int = 20,
         line(0.46, 0.54, 0.72, 0.28)
         line(0.54, 0.28, 0.72, 0.28)
         line(0.72, 0.28, 0.72, 0.46)
+    elif name in ("sidebar", "menu"):
+        line(0.24, 0.32, 0.76, 0.32)
+        line(0.24, 0.50, 0.76, 0.50)
+        line(0.24, 0.68, 0.76, 0.68)
     p.end()
     return QIcon(pm)
+
 
 
 def brand_pixmap(size: int = 36) -> QPixmap:
