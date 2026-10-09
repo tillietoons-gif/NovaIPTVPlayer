@@ -44,6 +44,7 @@ jobs:
             --name NovaIPTVPlayer `
             --icon assets/icon.ico `
             --add-data "assets;assets" `
+            --additional-hooks-dir pyinstaller-hooks `
             --collect-all PySide6 `
             --collect-all av `
             main.py
