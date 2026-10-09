@@ -1354,7 +1354,7 @@ class MainWindow(QMainWindow):
         self._current_channel = channel
 
         self.thumb_video.clear()
-        self.player.play(channel.url)
+        self.player.play(channel.url, channel.stream_headers)
         self.player.set_volume(self.vol.value())
         self.player.set_mute(self._muted)
 

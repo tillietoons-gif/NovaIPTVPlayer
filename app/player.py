@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import threading
 import time
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, Signal, QThread
 from PySide6.QtGui import QImage
@@ -59,6 +60,22 @@ _AUDIO_CHANNELS = 2
 _AUDIO_CHUNK = 8192  # bytes per QIODevice write
 
 
+def _open_options(url: str, stream_headers: dict[str, str]) -> dict[str, str]:
+    """Build FFmpeg options, including HTTP compatibility for live streams."""
+    options = {"rw_timeout": _RW_TIMEOUT_US}
+    if urlsplit(url).scheme.lower() in ("http", "https"):
+        headers = {key.lower(): value for key, value in stream_headers.items()}
+        options.update({
+            "user_agent": headers.get("user-agent", "NovaIPTV/1.0"),
+            "reconnect": "1",
+            "reconnect_streamed": "1",
+            "reconnect_delay_max": "5",
+        })
+        if "referer" in headers:
+            options["referer"] = headers["referer"]
+    return options
+
+
 def _pts_seconds(frame) -> float | None:
     """Frame presentation timestamp in seconds, or None if unknown."""
     if frame.pts is None:
@@ -79,9 +96,11 @@ class _DecodeWorker(QThread):
     position_changed = Signal(int, int)  # position_ms, duration_ms
 
     def __init__(self, url: str, volume: int, muted: bool,
+                 headers: dict[str, str] | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.url = url
+        self.headers = headers or {}
         self._volume = volume          # 0..125, polled from GUI thread
         self._muted = muted            # polled from GUI thread
         self._stop_event = threading.Event()
@@ -113,7 +132,8 @@ class _DecodeWorker(QThread):
     # -- worker ---------------------------------------------------------------
     def run(self) -> None:  # noqa: C901 - the decode loop is inherently long
         try:
-            container = av.open(self.url, options={"rw_timeout": _RW_TIMEOUT_US})
+            container = av.open(
+                self.url, options=_open_options(self.url, self.headers))
         except Exception:
             self.state_changed.emit("error")
             return
@@ -353,13 +373,15 @@ class Player(QObject):
         self._widget = widget
 
     # -- transport ----------------------------------------------------------------
-    def play(self, url: str) -> None:
+    def play(self, url: str,
+             headers: dict[str, str] | None = None) -> None:
         if not _AV_AVAILABLE:
             self.state_changed.emit("error")
             return
         self.stop()  # tear down any previous stream first
         self._current_url = url
-        self._worker = _DecodeWorker(url, self._volume, self._muted)
+        self._worker = _DecodeWorker(
+            url, self._volume, self._muted, dict(headers or {}))
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
         self._worker.frame_ready.connect(self.frame_ready.emit)
         self._worker.state_changed.connect(self.state_changed.emit)

@@ -16,6 +16,7 @@ class Channel:
     logo: str = ""
     group: str = ""
     kind: str = "live"  # one of: live | movie | series
+    stream_headers: dict[str, str] = field(default_factory=dict)
 
     @property
     def display_group(self) -> str:

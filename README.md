@@ -110,6 +110,9 @@ iptv-player/
 
 - **Black video / nothing plays** → check the stream URL works in a browser or
   another player; some providers expire tokens hourly or geo-block streams.
+- HTTP user-agent and referrer settings in `#EXTVLCOPT` playlist lines are
+  passed to the stream decoder. Streams that require other client-specific
+  options may still need a provider-compatible player.
 - **`import av` fails** → run `pip install "av>=11"` and retry. PyAV wheels
   bundle FFmpeg, so no system packages are needed.
 - **No audio but video works** → the stream may have no audio track, or the

@@ -42,6 +42,7 @@ def parse_m3u(text: str) -> list[Channel]:
     channels: list[Channel] = []
     pending_name = ""
     pending_attrs: dict[str, str] = {}
+    pending_headers: dict[str, str] = {}
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -52,10 +53,22 @@ def parse_m3u(text: str) -> list[Channel]:
             if m:
                 pending_name = m.group("name").strip()
                 pending_attrs = dict(_ATTR_RE.findall(m.group("attrs")))
+                pending_headers = {}
             else:
                 # Malformed EXTINF: take everything after the first comma.
                 pending_name = line.split(",", 1)[-1].strip()
                 pending_attrs = {}
+                pending_headers = {}
+        elif line.upper().startswith("#EXTVLCOPT:"):
+            option = line[len("#EXTVLCOPT:"):]
+            key, separator, value = option.partition("=")
+            header = {
+                "http-user-agent": "User-Agent",
+                "http-referrer": "Referer",
+                "http-referer": "Referer",
+            }.get(key.strip().lower())
+            if separator and header:
+                pending_headers[header] = value.strip()
         elif line.startswith("#"):
             continue  # other directives (EXTM3U, EXT-X-*, ...) are ignored
         else:
@@ -84,10 +97,12 @@ def parse_m3u(text: str) -> list[Channel]:
                         logo=pending_attrs.get("tvg-logo", ""),
                         group=group,
                         kind=_classify(group, name),
+                        stream_headers=pending_headers.copy(),
                     )
                 )
             pending_name = ""
             pending_attrs = {}
+            pending_headers = {}
     return channels
 
 

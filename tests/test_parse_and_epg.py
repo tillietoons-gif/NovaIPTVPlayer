@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.epg import EPGManager
+from app.player import _open_options
 from app.playlist import categories, filter_channels, parse_m3u
 
 
@@ -87,6 +88,44 @@ not-a-url
         channels = parse_m3u(text)
         self.assertEqual(len(channels), 1)
         self.assertEqual(channels[0].name, "BBC News")
+
+    def test_http_player_options_include_playlist_headers_and_reconnect(self) -> None:
+        options = _open_options(
+            "https://example.com/live",
+            {"User-Agent": "VLC Player", "Referer": "https://provider.example/"},
+        )
+
+        self.assertEqual(options["user_agent"], "VLC Player")
+        self.assertEqual(options["referer"], "https://provider.example/")
+        self.assertEqual(options["reconnect"], "1")
+        self.assertEqual(options["reconnect_streamed"], "1")
+        self.assertEqual(options["reconnect_delay_max"], "5")
+
+    def test_non_http_player_options_do_not_include_http_settings(self) -> None:
+        options = _open_options("rtsp://example.com/live", {})
+
+        self.assertEqual(options, {"rw_timeout": "15000000"})
+
+    def test_parse_m3u_preserves_stream_http_headers(self) -> None:
+        text = '''#EXTM3U
+#EXTINF:-1,Channel with headers
+#EXTVLCOPT:http-user-agent=VLC Player
+#EXTVLCOPT:http-referrer=https://provider.example/
+https://example.com/live
+#EXTINF:-1,Channel without headers
+https://example.com/other
+'''
+
+        channels = parse_m3u(text)
+
+        self.assertEqual(
+            channels[0].stream_headers,
+            {
+                "User-Agent": "VLC Player",
+                "Referer": "https://provider.example/",
+            },
+        )
+        self.assertEqual(channels[1].stream_headers, {})
 
 
 if __name__ == "__main__":
