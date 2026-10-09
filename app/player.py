@@ -107,6 +107,8 @@ class _DecodeWorker(QThread):
         self._paused = False
         self._pause_cond = threading.Condition()
         self._seek_ms: int | None = None  # pending seek request (polled)
+        self._last_shown_pts: float | None = None  # newest presented video pts
+        self.error_detail: str = ""  # first failure description, if any
 
     # -- control (called from the GUI thread) --------------------------------
     def request_stop(self) -> None:
@@ -134,14 +136,17 @@ class _DecodeWorker(QThread):
         try:
             container = av.open(
                 self.url, options=_open_options(self.url, self.headers))
-        except Exception:
+        except Exception as exc:
+            self.error_detail = f"Could not open stream: {exc}"
             self.state_changed.emit("error")
             return
 
         try:
             self._decode_loop(container)
-        except Exception:
+        except Exception as exc:
             # Any decode failure (codec missing, stream died, ...) -> error.
+            if not self.error_detail:
+                self.error_detail = f"Decode failed: {exc}"
             self.state_changed.emit("error")
         finally:
             try:
@@ -157,6 +162,7 @@ class _DecodeWorker(QThread):
                    if vstreams else None)
         astream = astreams[0] if astreams else None
         if vstream is None and astream is None:
+            self.error_detail = "No audio/video streams found in the URL"
             self.state_changed.emit("error")
             return
 
@@ -227,6 +233,7 @@ class _DecodeWorker(QThread):
                 try:
                     container.seek(int(ms * 1000))  # AV_TIME_BASE = µs
                     t0, pts_origin = None, None     # re-anchor on next frame
+                    self._last_shown_pts = None     # forget presented history
                     if sink is not None:
                         sink.reset()
                 except Exception:
@@ -297,10 +304,17 @@ class _DecodeWorker(QThread):
 
     def _handle_video(self, frame, pts: float, t0: float,
                       pts_origin: float) -> bool:
-        """Pace, convert and emit one video frame. Returns True if shown."""
-        due = t0 + (pts - pts_origin)
-        if due < time.monotonic() - _LATE_DROP_S:
-            return False  # too late: drop it, don't bunch up
+        """Pace, convert and emit one video frame. Returns True if shown.
+
+        Staleness is judged against the newest *presented* pts, not the
+        wall clock: audio/video packets are often interleaved unevenly, so
+        a frame decoded "late" by the clock may still be the newest picture
+        we have and must be shown (it catches up instantly). Only frames
+        older than what is already on screen are dropped.
+        """
+        if (self._last_shown_pts is not None
+                and pts < self._last_shown_pts - _LATE_DROP_S):
+            return False  # stale: a newer picture is already on screen
         self._pace(pts, t0, pts_origin)
         if self._stop_event.is_set() or self._seek_ms is not None:
             return False
@@ -316,6 +330,7 @@ class _DecodeWorker(QThread):
         if img.isNull():
             return False
         self.frame_ready.emit(img)
+        self._last_shown_pts = pts
         return True
 
     def _write_audio(self, frame, resampler, device) -> None:
@@ -358,6 +373,7 @@ class Player(QObject):
         self._volume = 80
         self._muted = False
         self._current_url = ""
+        self._last_error = ""         # human-readable reason for last failure
 
     # -- setup ------------------------------------------------------------------
     @staticmethod
@@ -376,17 +392,35 @@ class Player(QObject):
     def play(self, url: str,
              headers: dict[str, str] | None = None) -> None:
         if not _AV_AVAILABLE:
+            self._last_error = (
+                "Video engine could not be loaded. "
+                + (str(_AV_IMPORT_ERROR) if _AV_IMPORT_ERROR else
+                   "Reinstall the app or run: pip install av"))
             self.state_changed.emit("error")
             return
         self.stop()  # tear down any previous stream first
         self._current_url = url
+        self._last_error = ""
         self._worker = _DecodeWorker(
             url, self._volume, self._muted, dict(headers or {}))
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
         self._worker.frame_ready.connect(self.frame_ready.emit)
         self._worker.state_changed.connect(self.state_changed.emit)
+        self._worker.state_changed.connect(self._capture_worker_error)
         self._worker.position_changed.connect(self.position_changed.emit)
         self._worker.start()
+
+    def _capture_worker_error(self, state: str) -> None:
+        """Remember the worker's failure reason for the error dialog."""
+        if state == "error" and self._worker is not None:
+            detail = (self._worker.error_detail or "").strip()
+            if detail:
+                self._last_error = detail
+
+    @property
+    def last_error(self) -> str:
+        """Human-readable reason for the most recent playback failure."""
+        return self._last_error
 
     def stop(self) -> None:
         worker, self._worker = self._worker, None

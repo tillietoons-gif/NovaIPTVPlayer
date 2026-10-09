@@ -1435,11 +1435,13 @@ class MainWindow(QMainWindow):
         elif state in ("stopped", "error"):
             self.pp_btn.setIcon(make_icon("play", 18))
         if state == "error":
-            QMessageBox.warning(
-                self, "Playback error",
-                "The built-in player could not play this stream.\n"
-                "It may be offline, geo-blocked, use an unsupported codec, "
-                "or the playlist URL expired.")
+            detail = (self.player.last_error or "").strip()
+            msg = ("The built-in player could not play this stream.\n"
+                   "It may be offline, geo-blocked, use an unsupported codec, "
+                   "or the playlist URL expired.")
+            if detail:
+                msg += f"\n\nDetails: {detail}"
+            QMessageBox.warning(self, "Playback error", msg)
 
     # -- now playing panel ----------------------------------------------------------
     def _update_now_next(self) -> None:
