@@ -94,6 +94,10 @@ class _DecodeWorker(QThread):
     frame_ready = Signal(QImage)
     state_changed = Signal(str)      # playing | paused | stopped | error | buffering
     position_changed = Signal(int, int)  # position_ms, duration_ms
+    recording_started = Signal(str)  # path
+    recording_stopped = Signal(str)  # final path
+    recording_error = Signal(str)    # human-readable failure reason
+    ended = Signal()                 # natural end of stream (not user stop)
 
     def __init__(self, url: str, volume: int, muted: bool,
                  headers: dict[str, str] | None = None,
@@ -109,6 +113,13 @@ class _DecodeWorker(QThread):
         self._seek_ms: int | None = None  # pending seek request (polled)
         self._last_shown_pts: float | None = None  # newest presented video pts
         self.error_detail: str = ""  # first failure description, if any
+        self.seekable = False        # True once a finite duration is known
+        # recording state (plain attributes polled from the GUI thread)
+        self._rec_request: str | None = None  # pending start request
+        self._rec_stop = False                # pending stop request
+        self._rec_out = None                  # open av output container
+        self._rec_map: dict = {}              # input stream -> output stream
+        self._rec_path: str | None = None     # path of the active recording
 
     # -- control (called from the GUI thread) --------------------------------
     def request_stop(self) -> None:
@@ -124,6 +135,22 @@ class _DecodeWorker(QThread):
 
     def request_seek(self, ms: int) -> None:
         self._seek_ms = max(0, int(ms))
+
+    def request_recording(self, path: str) -> None:
+        """Start remuxing the stream to *path* (no re-encode)."""
+        self._rec_request = path
+        self._rec_stop = False
+
+    def request_stop_recording(self) -> str | None:
+        """Ask the worker to finalize the recording; returns its path."""
+        path = self._rec_path
+        self._rec_request = None  # cancel a not-yet-started recording too
+        self._rec_stop = True
+        return path
+
+    @property
+    def is_recording(self) -> bool:
+        return self._rec_out is not None or self._rec_request is not None
 
     def set_volume(self, volume: int) -> None:
         self._volume = max(0, min(125, int(volume)))
@@ -149,6 +176,7 @@ class _DecodeWorker(QThread):
                 self.error_detail = f"Decode failed: {exc}"
             self.state_changed.emit("error")
         finally:
+            self._close_recording()  # finalize a recording on any exit path
             try:
                 container.close()
             except Exception:
@@ -170,6 +198,7 @@ class _DecodeWorker(QThread):
             duration_ms = max(0, int(container.duration // 1000))
         except Exception:
             duration_ms = 0  # live streams report no duration
+        self.seekable = duration_ms > 0
 
         # Audio output chain (created in this thread for correct affinity).
         sink: QAudioSink | None = None
@@ -199,7 +228,7 @@ class _DecodeWorker(QThread):
         last_report = 0.0
         last_vol = self._effective_volume()
 
-        for frame in container.decode(*streams):
+        for packet in container.demux(*streams):
             if self._stop_event.is_set():
                 break
 
@@ -236,45 +265,64 @@ class _DecodeWorker(QThread):
                     self._last_shown_pts = None     # forget presented history
                     if sink is not None:
                         sink.reset()
+                    # A seek would corrupt the recording's timeline: finalize
+                    # the file instead of writing discontinuous timestamps.
+                    self._close_recording(
+                        "Recording stopped: seeking is not supported "
+                        "while recording.")
                 except Exception:
                     pass  # live/unsupported: keep playing from current point
 
-            # -- live volume/mute changes ------------------------------------
-            vol = self._effective_volume()
-            if sink is not None and vol != last_vol:
-                try:
-                    sink.setVolume(vol)
-                except Exception:
-                    pass
-                last_vol = vol
+            # -- recording: open the output on request, mux each packet ------
+            if self._rec_stop:
+                self._rec_stop = False
+                self._close_recording()
+            self._maybe_start_recording(vstream, astream)
 
-            pts = _pts_seconds(frame)
-            if pts is None:
-                continue
-            if pts_origin is None:  # anchor the clock on the first frame
-                pts_origin = pts
-                t0 = time.monotonic()
-            if not got_first:
-                got_first = True
-                self.state_changed.emit("playing")
-            assert t0 is not None
+            try:
+                frames = list(packet.decode())
+            except Exception:
+                continue  # a corrupt packet must not kill playback
+            if self._rec_out is not None:
+                self._mux_packet(packet)
 
-            if isinstance(frame, av.VideoFrame):
-                if self._handle_video(frame, pts, t0, pts_origin):
-                    position_s = max(position_s, pts)
-            elif isinstance(frame, av.AudioFrame):
-                if sink is not None and device is not None and resampler is not None:
-                    self._pace(pts, t0, pts_origin)
-                    if self._stop_event.is_set() or self._seek_ms is not None:
-                        continue
-                    self._write_audio(frame, resampler, device)
-                    position_s = max(position_s, pts)
+            for frame in frames:
+                # -- live volume/mute changes ------------------------------------
+                vol = self._effective_volume()
+                if sink is not None and vol != last_vol:
+                    try:
+                        sink.setVolume(vol)
+                    except Exception:
+                        pass
+                    last_vol = vol
 
-            now = time.monotonic()
-            if now - last_report >= 1.0 and pts_origin is not None:
-                last_report = now
-                pos_ms = max(0, int((position_s - pts_origin) * 1000))
-                self.position_changed.emit(pos_ms, duration_ms)
+                pts = _pts_seconds(frame)
+                if pts is None:
+                    continue
+                if pts_origin is None:  # anchor the clock on the first frame
+                    pts_origin = pts
+                    t0 = time.monotonic()
+                if not got_first:
+                    got_first = True
+                    self.state_changed.emit("playing")
+                assert t0 is not None
+
+                if isinstance(frame, av.VideoFrame):
+                    if self._handle_video(frame, pts, t0, pts_origin):
+                        position_s = max(position_s, pts)
+                elif isinstance(frame, av.AudioFrame):
+                    if sink is not None and device is not None and resampler is not None:
+                        self._pace(pts, t0, pts_origin)
+                        if self._stop_event.is_set() or self._seek_ms is not None:
+                            continue
+                        self._write_audio(frame, resampler, device)
+                        position_s = max(position_s, pts)
+
+                now = time.monotonic()
+                if now - last_report >= 1.0 and pts_origin is not None:
+                    last_report = now
+                    pos_ms = max(0, int((position_s - pts_origin) * 1000))
+                    self.position_changed.emit(pos_ms, duration_ms)
 
         # Natural end of stream (or stop): release the audio device.
         if sink is not None:
@@ -283,7 +331,65 @@ class _DecodeWorker(QThread):
             except Exception:
                 pass
         if not self._stop_event.is_set():
+            self._close_recording()  # finalize any recording first
+            self.ended.emit()        # natural end (not a user stop)
             self.state_changed.emit("stopped")
+
+    # -- recording (remux, no re-encode) ------------------------------------------
+    def _maybe_start_recording(self, vstream, astream) -> None:
+        """Open the MP4 output on a pending start request (worker thread)."""
+        if self._rec_out is not None or self._rec_request is None:
+            return
+        path, self._rec_request = self._rec_request, None
+        try:
+            out = av.open(path, "w", format="mp4")
+            mapping: dict = {}
+            if vstream is not None:
+                mapping[vstream] = out.add_stream(template=vstream)
+            if astream is not None:
+                mapping[astream] = out.add_stream(template=astream)
+            if not mapping:
+                raise RuntimeError("no streams to record")
+            if hasattr(out, "start_writing"):
+                out.start_writing()
+            self._rec_out = out
+            self._rec_map = mapping
+            self._rec_path = path
+        except Exception as exc:
+            self._close_recording()  # defensive: never leave a half-open file
+            self.recording_error.emit(f"Could not start recording: {exc}")
+            return
+        self.recording_started.emit(path)
+
+    def _mux_packet(self, packet) -> None:
+        """Write one demuxed packet to the recording (worker thread)."""
+        out_stream = self._rec_map.get(packet.stream)
+        if out_stream is None:
+            return
+        if packet.dts is None:
+            return  # can't mux without a timestamp; skip gracefully
+        try:
+            packet.stream = out_stream  # route to the output stream
+            self._rec_out.mux(packet)
+        except Exception as exc:
+            # Recording must never kill playback: finalize what we have.
+            self._close_recording(f"Recording failed: {exc}")
+
+    def _close_recording(self, error: str | None = None) -> None:
+        """Finalize the recording file (worker thread). Emits signals."""
+        out, self._rec_out = self._rec_out, None
+        self._rec_map = {}
+        path, self._rec_path = self._rec_path, None
+        if out is None:
+            return
+        try:
+            out.close()  # writes the MP4 trailer
+        except Exception:
+            pass
+        if path:
+            if error:
+                self.recording_error.emit(error)
+            self.recording_stopped.emit(path)
 
     # -- helpers ----------------------------------------------------------------
     def _effective_volume(self) -> float:
@@ -364,6 +470,10 @@ class Player(QObject):
     state_changed = Signal(str)       # playing | paused | stopped | error | buffering
     position_changed = Signal(int, int)  # position_ms, duration_ms
     frame_ready = Signal(QImage)      # decoded video frame (already copied)
+    recording_started = Signal(str)  # path
+    recording_stopped = Signal(str)  # final path
+    recording_error = Signal(str)    # human-readable failure reason
+    playback_finished = Signal()     # natural end of stream (not user stop)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -374,6 +484,8 @@ class Player(QObject):
         self._muted = False
         self._current_url = ""
         self._last_error = ""         # human-readable reason for last failure
+        self._last_pos_s = 0.0        # last reported position, seconds
+        self._last_dur_s: float | None = None  # last reported duration, s
 
     # -- setup ------------------------------------------------------------------
     @staticmethod
@@ -401,6 +513,8 @@ class Player(QObject):
         self.stop()  # tear down any previous stream first
         self._current_url = url
         self._last_error = ""
+        self._last_pos_s = 0.0
+        self._last_dur_s = None
         self._worker = _DecodeWorker(
             url, self._volume, self._muted, dict(headers or {}))
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
@@ -408,7 +522,16 @@ class Player(QObject):
         self._worker.state_changed.connect(self.state_changed.emit)
         self._worker.state_changed.connect(self._capture_worker_error)
         self._worker.position_changed.connect(self.position_changed.emit)
+        self._worker.position_changed.connect(self._track_position)
+        self._worker.recording_started.connect(self.recording_started.emit)
+        self._worker.recording_stopped.connect(self.recording_stopped.emit)
+        self._worker.recording_error.connect(self.recording_error.emit)
+        self._worker.ended.connect(self.playback_finished.emit)
         self._worker.start()
+
+    def _track_position(self, pos_ms: int, dur_ms: int) -> None:
+        self._last_pos_s = max(0.0, pos_ms / 1000.0)
+        self._last_dur_s = dur_ms / 1000.0 if dur_ms > 0 else None
 
     def _capture_worker_error(self, state: str) -> None:
         """Remember the worker's failure reason for the error dialog."""
@@ -423,6 +546,7 @@ class Player(QObject):
         return self._last_error
 
     def stop(self) -> None:
+        self.stop_recording()  # finalize any recording first
         worker, self._worker = self._worker, None
         if worker is not None:
             worker.request_stop()
@@ -444,14 +568,53 @@ class Player(QObject):
         if self._worker is not None and self._worker.isRunning():
             self._worker.toggle_pause()
 
-    def seek(self, ms: int) -> None:
-        """Seek VOD streams; silently ignored for live streams."""
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.request_seek(ms)
+    def seek(self, seconds: float) -> bool:
+        """Seek VOD streams. Returns False for live/unseekable streams.
+
+        Live channels are never seek-disturbed: the request is refused
+        instead of being sent to the worker.
+        """
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return False
+        if not worker.seekable:
+            return False
+        worker.request_seek(int(max(0.0, seconds) * 1000))
+        return True
 
     @property
     def current_url(self) -> str:
         return self._current_url
+
+    def position(self) -> float:
+        """Seconds into the current stream (0.0 if unknown)."""
+        return self._last_pos_s
+
+    def duration(self) -> float | None:
+        """Stream duration in seconds, or None for live/unknown."""
+        return self._last_dur_s
+
+    # -- recording ------------------------------------------------------------------
+    def start_recording(self, path: str) -> None:
+        """Begin remuxing the current stream to *path* (MP4, no re-encode)."""
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker.request_recording(path)
+        else:
+            self.recording_error.emit("Nothing is playing to record.")
+
+    def stop_recording(self) -> str | None:
+        """Finalize the active recording; returns its path (or None)."""
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            return worker.request_stop_recording()
+        return None
+
+    @property
+    def is_recording(self) -> bool:
+        worker = self._worker
+        return bool(worker is not None and worker.isRunning()
+                    and worker.is_recording)
 
     # -- audio ----------------------------------------------------------------------
     def set_volume(self, volume: int) -> None:
