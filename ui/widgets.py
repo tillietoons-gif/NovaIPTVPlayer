@@ -197,6 +197,50 @@ def make_icon(name: str, size: int = 20,
         p.drawPolyline([QPointF(s * 0.52, s * 0.70),
                         QPointF(s * 0.70, s * 0.70),
                         QPointF(s * 0.70, s * 0.52)])
+    elif name in ("back", "arrow_left"):
+        line(0.72, 0.50, 0.28, 0.50)
+        p.drawPolyline([
+            QPointF(s * 0.48, s * 0.30),
+            QPointF(s * 0.28, s * 0.50),
+            QPointF(s * 0.48, s * 0.70),
+        ])
+    elif name == "compress":
+        line(0.24, 0.46, 0.46, 0.46)
+        line(0.46, 0.24, 0.46, 0.46)
+        line(0.24, 0.24, 0.46, 0.46)
+        line(0.76, 0.54, 0.54, 0.54)
+        line(0.54, 0.76, 0.54, 0.54)
+        line(0.76, 0.76, 0.54, 0.54)
+    elif name == "volume":
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawPolygon([
+            QPointF(s * 0.18, s * 0.38),
+            QPointF(s * 0.34, s * 0.38),
+            QPointF(s * 0.50, s * 0.22),
+            QPointF(s * 0.50, s * 0.78),
+            QPointF(s * 0.34, s * 0.62),
+            QPointF(s * 0.18, s * 0.62),
+        ])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(s * 0.44, s * 0.32, s * 0.26, s * 0.36), -50 * 16, 100 * 16)
+        p.drawArc(QRectF(s * 0.44, s * 0.20, s * 0.40, s * 0.60), -50 * 16, 100 * 16)
+    elif name == "mute":
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawPolygon([
+            QPointF(s * 0.18, s * 0.38),
+            QPointF(s * 0.34, s * 0.38),
+            QPointF(s * 0.50, s * 0.22),
+            QPointF(s * 0.50, s * 0.78),
+            QPointF(s * 0.34, s * 0.62),
+            QPointF(s * 0.18, s * 0.62),
+        ])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        line(0.64, 0.36, 0.82, 0.64)
+        line(0.82, 0.36, 0.64, 0.64)
     elif name == "trash":
         line(0.38, 0.24, 0.62, 0.24)                      # lid
         line(0.32, 0.24, 0.68, 0.24)

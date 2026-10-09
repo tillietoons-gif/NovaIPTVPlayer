@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from PySide6.QtCore import (
     Qt, QThread, Signal, QPoint, QTimer, QPropertyAnimation,
-    QAbstractAnimation, QUrl, QStandardPaths,
+    QAbstractAnimation, QUrl, QStandardPaths, QEvent,
 )
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -234,22 +234,414 @@ class _ClickableRow(QFrame):
 
 
 class _FullscreenVideo(QDialog):
-    """Fullscreen playback window (Esc to exit)."""
+    """Fullscreen playback window with auto-hiding controls, back button, and transport bar."""
 
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent, Qt.Window)
-        self.setWindowTitle("Now Playing")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self.video = VideoWidget(placeholder="")
-        lay.addWidget(self.video)
+    def __init__(self, main_window: MainWindow) -> None:
+        super().__init__(main_window, Qt.Window)
+        self.main: MainWindow = main_window
+        self.setWindowTitle("Nova IPTV - Now Playing")
+        self.setStyleSheet("background-color: #000000;")
+        self.setMouseTracking(True)
+
+        self._is_dragging_seek = False
+        self._current_dur_ms = 0
+
+        # Video surface (fills full dialog)
+        self.video = VideoWidget(self, placeholder="")
+        self.video.setMouseTracking(True)
+        self.video.installEventFilter(self)
+
+        # Build overlay bars
+        self._build_top_bar()
+        self._build_bottom_bar()
+
+        # Inactivity auto-hide timer for overlays & cursor
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setInterval(3500)
+        self._hide_timer.timeout.connect(self._auto_hide_controls)
+
+        # Connect player signals for live feedback in fullscreen
+        self.main.player.state_changed.connect(self._on_player_state)
+        self.main.player.position_changed.connect(self._on_position_changed)
+
+        # Initialize labels, states, and volumes
+        self._update_channel_info()
+        self._on_player_state(self.main._player_state)
+        self._update_volume_ui()
+
         self.showFullScreen()
+        self._show_controls()
+
+    def _build_top_bar(self) -> None:
+        self.top_bar = QWidget(self)
+        self.top_bar.setObjectName("fsTopBar")
+        self.top_bar.setStyleSheet("""
+            QWidget#fsTopBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(8, 10, 15, 230),
+                    stop:0.65 rgba(8, 10, 15, 170),
+                    stop:1 rgba(8, 10, 15, 0));
+                border: none;
+            }
+        """)
+        lay = QHBoxLayout(self.top_bar)
+        lay.setContentsMargins(24, 16, 24, 20)
+        lay.setSpacing(14)
+
+        # Back button
+        self.back_btn = QPushButton("  Back")
+        self.back_btn.setObjectName("fsBackBtn")
+        self.back_btn.setIcon(make_icon("back", 18, COLORS["text"]))
+        self.back_btn.setCursor(Qt.PointingHandCursor)
+        self.back_btn.setToolTip("Back to window (Esc)")
+        self.back_btn.setStyleSheet(f"""
+            QPushButton#fsBackBtn {{
+                background: {COLORS["surface"]};
+                color: {COLORS["text"]};
+                border: 1px solid {COLORS["border"]};
+                border-radius: 19px;
+                padding: 7px 18px;
+                font-size: 11pt;
+                font-weight: 600;
+            }}
+            QPushButton#fsBackBtn:hover {{
+                background: {COLORS["surface2"]};
+                border-color: {COLORS["accent"]};
+                color: white;
+            }}
+        """)
+        self.back_btn.clicked.connect(self.accept)
+        lay.addWidget(self.back_btn)
+
+        # Title & Subtitle
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        self.title_label = QLabel("")
+        self.title_label.setStyleSheet("color: #ffffff; font-size: 14pt; font-weight: 700;")
+        title_box.addWidget(self.title_label)
+
+        self.sub_label = QLabel("")
+        self.sub_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 10pt;")
+        title_box.addWidget(self.sub_label)
+        lay.addLayout(title_box)
+
+        lay.addStretch(1)
+
+        # Live pill badge
+        self.live_badge = QLabel("● LIVE")
+        self.live_badge.setStyleSheet(f"""
+            background: rgba(239, 68, 68, 0.2);
+            color: {COLORS['red']};
+            border: 1px solid rgba(239, 68, 68, 0.5);
+            border-radius: 12px;
+            padding: 4px 12px;
+            font-size: 9pt;
+            font-weight: 700;
+        """)
+        lay.addWidget(self.live_badge)
+
+        # Exit fullscreen button
+        self.close_fs_btn = self._fs_btn("compress", 18, "Exit Fullscreen (Esc)", self.accept)
+        lay.addWidget(self.close_fs_btn)
+
+    def _build_bottom_bar(self) -> None:
+        self.bottom_bar = QWidget(self)
+        self.bottom_bar.setObjectName("fsBottomBar")
+        self.bottom_bar.setStyleSheet("""
+            QWidget#fsBottomBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(8, 10, 15, 0),
+                    stop:0.3 rgba(8, 10, 15, 180),
+                    stop:1 rgba(8, 10, 15, 235));
+                border: none;
+            }
+        """)
+        lay = QVBoxLayout(self.bottom_bar)
+        lay.setContentsMargins(28, 12, 28, 22)
+        lay.setSpacing(10)
+
+        # Progress / Seek row (for VOD / movies / series)
+        self.seek_row = QWidget()
+        seek_lay = QHBoxLayout(self.seek_row)
+        seek_lay.setContentsMargins(0, 0, 0, 0)
+        seek_lay.setSpacing(12)
+
+        self.pos_label = QLabel("00:00")
+        self.pos_label.setStyleSheet("color: #d1d5db; font-size: 10pt; font-family: monospace;")
+        seek_lay.addWidget(self.pos_label)
+
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setRange(0, 1000)
+        self.seek_slider.setValue(0)
+        self.seek_slider.setCursor(Qt.PointingHandCursor)
+        self.seek_slider.sliderPressed.connect(self._on_seek_pressed)
+        self.seek_slider.sliderReleased.connect(self._on_seek_released)
+        seek_lay.addWidget(self.seek_slider, 1)
+
+        self.dur_label = QLabel("00:00")
+        self.dur_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 10pt; font-family: monospace;")
+        seek_lay.addWidget(self.dur_label)
+
+        lay.addWidget(self.seek_row)
+
+        # Controls row
+        ctrl_lay = QHBoxLayout()
+        ctrl_lay.setSpacing(14)
+
+        # Previous Channel
+        self.prev_btn = self._fs_btn("prev", 18, "Previous Channel (Left Arrow)", self._on_prev)
+        ctrl_lay.addWidget(self.prev_btn)
+
+        # Play / Pause button
+        self.pp_btn = QPushButton()
+        self.pp_btn.setObjectName("fsPlayPauseBtn")
+        self.pp_btn.setIcon(make_icon("pause", 22, "white"))
+        self.pp_btn.setFixedSize(48, 48)
+        self.pp_btn.setCursor(Qt.PointingHandCursor)
+        self.pp_btn.setToolTip("Play / Pause (Space)")
+        self.pp_btn.setStyleSheet(f"""
+            QPushButton#fsPlayPauseBtn {{
+                background: {COLORS["accent"]};
+                border: none;
+                border-radius: 24px;
+            }}
+            QPushButton#fsPlayPauseBtn:hover {{
+                background: {COLORS["accent2"]};
+            }}
+        """)
+        self.pp_btn.clicked.connect(self._on_play_pause)
+        ctrl_lay.addWidget(self.pp_btn)
+
+        # Next Channel
+        self.next_btn = self._fs_btn("next", 18, "Next Channel (Right Arrow)", self._on_next)
+        ctrl_lay.addWidget(self.next_btn)
+
+        # Stop button
+        self.stop_btn = self._fs_btn("stop", 16, "Stop Playback", self._on_stop)
+        ctrl_lay.addWidget(self.stop_btn)
+
+        ctrl_lay.addStretch(1)
+
+        # Volume control
+        self.mute_btn = self._fs_btn("volume", 18, "Mute (M)", self._on_mute)
+        ctrl_lay.addWidget(self.mute_btn)
+
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setRange(0, 125)
+        self.vol_slider.setValue(self.main.config.volume)
+        self.vol_slider.setFixedWidth(110)
+        self.vol_slider.setCursor(Qt.PointingHandCursor)
+        self.vol_slider.valueChanged.connect(self._on_vol_changed)
+        ctrl_lay.addWidget(self.vol_slider)
+
+        ctrl_lay.addSpacing(10)
+
+        # Exit Fullscreen button
+        self.exit_fs_btn = self._fs_btn("compress", 18, "Exit Fullscreen (Esc)", self.accept)
+        ctrl_lay.addWidget(self.exit_fs_btn)
+
+        lay.addLayout(ctrl_lay)
+
+    def _fs_btn(self, icon: str, size: int, tooltip: str, slot) -> QPushButton:
+        b = QPushButton()
+        b.setObjectName("fsCtrlBtn")
+        b.setIcon(make_icon(icon, size, COLORS["text"]))
+        b.setFixedSize(38, 38)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setToolTip(tooltip)
+        b.setStyleSheet(f"""
+            QPushButton#fsCtrlBtn {{
+                background: {COLORS["surface"]};
+                border: 1px solid {COLORS["border"]};
+                border-radius: 19px;
+            }}
+            QPushButton#fsCtrlBtn:hover {{
+                background: {COLORS["surface2"]};
+                border-color: {COLORS["accent"]};
+            }}
+        """)
+        b.clicked.connect(slot)
+        return b
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        w, h = self.width(), self.height()
+        self.video.setGeometry(0, 0, w, h)
+        top_h = max(70, self.top_bar.sizeHint().height())
+        bot_h = max(90, self.bottom_bar.sizeHint().height())
+        self.top_bar.setGeometry(0, 0, w, top_h)
+        self.bottom_bar.setGeometry(0, h - bot_h, w, bot_h)
+        self.top_bar.raise_()
+        self.bottom_bar.raise_()
+
+    def _show_controls(self) -> None:
+        self.top_bar.show()
+        self.bottom_bar.show()
+        self.unsetCursor()
+        self._hide_timer.start()
+
+    def _auto_hide_controls(self) -> None:
+        if self._is_dragging_seek:
+            return
+        if self.top_bar.underMouse() or self.bottom_bar.underMouse():
+            return
+        self.top_bar.hide()
+        self.bottom_bar.hide()
+        self.setCursor(Qt.BlankCursor)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        super().mouseMoveEvent(event)
+        self._show_controls()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.video:
+            if event.type() in (QEvent.MouseMove, QEvent.MouseButtonPress):
+                self._show_controls()
+            elif event.type() == QEvent.MouseButtonDblClick:
+                self.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _on_play_pause(self) -> None:
+        self.main._toggle_pause()
+        self._show_controls()
+
+    def _on_prev(self) -> None:
+        self.main._play_prev()
+        self._update_channel_info()
+        self._show_controls()
+
+    def _on_next(self) -> None:
+        self.main._play_next()
+        self._update_channel_info()
+        self._show_controls()
+
+    def _on_stop(self) -> None:
+        self.main.player.stop()
+        self.accept()
+
+    def _on_mute(self) -> None:
+        self.main._toggle_mute()
+        self._update_volume_ui()
+        self._show_controls()
+
+    def _on_vol_changed(self, val: int) -> None:
+        self.main._on_volume(val)
+        self._update_volume_ui()
+        self._show_controls()
+
+    def _update_volume_ui(self) -> None:
+        muted = self.main._muted
+        vol = self.main.config.volume
+        self.vol_slider.blockSignals(True)
+        self.vol_slider.setValue(0 if muted else vol)
+        self.vol_slider.blockSignals(False)
+        self.mute_btn.setIcon(make_icon("mute" if (muted or vol == 0) else "volume", 18,
+                                        COLORS["red"] if muted else COLORS["text"]))
+
+    def _on_player_state(self, state: str) -> None:
+        if state == "playing":
+            self.pp_btn.setIcon(make_icon("pause", 22, "white"))
+        else:
+            self.pp_btn.setIcon(make_icon("play", 22, "white"))
+
+    def _on_position_changed(self, pos_ms: int, dur_ms: int) -> None:
+        self._current_dur_ms = dur_ms
+        is_live = dur_ms <= 0
+        self.live_badge.setVisible(is_live)
+        self.seek_row.setVisible(not is_live)
+        if not is_live and dur_ms > 0:
+            if not self._is_dragging_seek:
+                pct = int(min(1.0, max(0.0, pos_ms / dur_ms)) * 1000)
+                self.seek_slider.blockSignals(True)
+                self.seek_slider.setValue(pct)
+                self.seek_slider.blockSignals(False)
+            self.pos_label.setText(self._format_time(pos_ms // 1000))
+            self.dur_label.setText(self._format_time(dur_ms // 1000))
+
+    def _on_seek_pressed(self) -> None:
+        self._is_dragging_seek = True
+        self._hide_timer.stop()
+
+    def _on_seek_released(self) -> None:
+        self._is_dragging_seek = False
+        self._hide_timer.start()
+        if self._current_dur_ms > 0:
+            target_s = (self.seek_slider.value() / 1000.0) * (self._current_dur_ms / 1000.0)
+            self.main.player.seek(target_s)
+
+    @staticmethod
+    def _format_time(seconds: int) -> str:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    def _update_channel_info(self) -> None:
+        ch = self.main._current_channel
+        if ch is not None:
+            self.title_label.setText(ch.name)
+            sub_parts = []
+            if ch.display_group:
+                sub_parts.append(ch.display_group)
+            if ch.kind:
+                sub_parts.append(ch.kind.title())
+            if self.main.epg.loaded and ch.kind == "live":
+                now, _ = self.main.epg.now_and_next(ch.tvg_id, ch.name)
+                if now:
+                    sub_parts.append(f"Now: {now.title}")
+            self.sub_label.setText("  •  ".join(sub_parts))
+            self.live_badge.setVisible(ch.kind == "live")
+        else:
+            self.title_label.setText("Now Playing")
+            self.sub_label.setText("")
+            self.live_badge.setVisible(False)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key_Escape:
+        key = event.key()
+        self._show_controls()
+        if key in (Qt.Key_Escape, Qt.Key_F, Qt.Key_Back):
             self.accept()
+        elif key == Qt.Key_Space:
+            self._on_play_pause()
+        elif key == Qt.Key_Left:
+            if self._current_dur_ms > 0:
+                pos = self.main.player.position()
+                self.main.player.seek(max(0.0, pos - 10.0))
+            else:
+                self._on_prev()
+        elif key == Qt.Key_Right:
+            if self._current_dur_ms > 0:
+                pos = self.main.player.position()
+                dur = self.main.player.duration() or (self._current_dur_ms / 1000.0)
+                self.main.player.seek(min(dur, pos + 10.0))
+            else:
+                self._on_next()
+        elif key == Qt.Key_Up:
+            v = min(125, self.main.config.volume + 5)
+            self._on_vol_changed(v)
+        elif key == Qt.Key_Down:
+            v = max(0, self.main.config.volume - 5)
+            self._on_vol_changed(v)
+        elif key == Qt.Key_M:
+            self._on_mute()
         else:
             super().keyPressEvent(event)
+
+    def done(self, r: int) -> None:
+        self.unsetCursor()
+        self._hide_timer.stop()
+        try:
+            self.main.player.state_changed.disconnect(self._on_player_state)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.main.player.position_changed.disconnect(self._on_position_changed)
+        except (RuntimeError, TypeError):
+            pass
+        super().done(r)
 
 
 class _ConnectionDialog(QDialog):
@@ -1679,6 +2071,9 @@ class MainWindow(QMainWindow):
         cl.setSpacing(8)
         self.thumb_video = VideoWidget(placeholder="Select a channel to play")
         self.thumb_video.setFixedHeight(150)
+        self.thumb_video.mouseDoubleClickEvent = lambda _e: self._toggle_fullscreen()
+        self.thumb_video.setCursor(Qt.PointingHandCursor)
+        self.thumb_video.setToolTip("Double-click for fullscreen (or press F)")
         cl.addWidget(self.thumb_video)
         self.np_title = ElidedLabel("Nothing playing")
         self.np_title.setObjectName("cardName")

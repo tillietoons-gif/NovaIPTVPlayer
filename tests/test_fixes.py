@@ -143,5 +143,48 @@ class TestPlayerSignalsAndWorker(unittest.TestCase):
         self.assertNotIn("playing", signal_received)
 
 
+class TestFullscreenVideo(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_fullscreen_controls_and_back_button(self) -> None:
+        from PySide6.QtWidgets import QWidget
+        from ui.main_window import _FullscreenVideo
+        from app.models import Channel
+        from app.player import Player
+
+        class DummyMain(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.player = Player()
+                self._current_channel = Channel(name="Test News HD", url="http://test/1", group="News", kind="live")
+                self._player_state = "playing"
+                self.config = AppConfig()
+                self.epg = EPGManager()
+                self._muted = False
+            def _toggle_pause(self): pass
+            def _play_prev(self): pass
+            def _play_next(self): pass
+            def _toggle_mute(self): pass
+            def _on_volume(self, v): pass
+
+        main = DummyMain()
+        fs = _FullscreenVideo(main)
+        self.assertIsNotNone(fs.back_btn)
+        self.assertIsNotNone(fs.pp_btn)
+        self.assertIsNotNone(fs.prev_btn)
+        self.assertIsNotNone(fs.next_btn)
+        self.assertIsNotNone(fs.vol_slider)
+        self.assertEqual(fs.title_label.text(), "Test News HD")
+        self.assertTrue(fs.live_badge.isVisible())
+
+        # Test back button closes fullscreen
+        fs.back_btn.click()
+        self.assertEqual(fs.result(), _FullscreenVideo.Accepted)
+        fs.deleteLater()
+        main.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()
