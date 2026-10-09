@@ -267,6 +267,14 @@ def make_icon(name: str, size: int = 20,
         p.setBrush(col)
         p.drawEllipse(QPointF(s * 0.50, s * 0.50),
                       s * 0.30, s * 0.30)                 # record dot
+    elif name in ("help", "question"):
+        p.drawEllipse(QRectF(s * 0.18, s * 0.18, s * 0.64, s * 0.64))
+        p.drawArc(QRectF(s * 0.38, s * 0.30, s * 0.24, s * 0.20), 0, 180 * 16)
+        line(0.62, 0.40, 0.50, 0.52)
+        line(0.50, 0.52, 0.50, 0.60)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QRectF(s * 0.46, s * 0.68, s * 0.08, s * 0.08))
     p.end()
     return QIcon(pm)
 
@@ -358,8 +366,12 @@ def quality_of(channel: Channel) -> str:
 
 # -- async image loading ----------------------------------------------------
 
+_IMAGE_CACHE: dict[str, QImage] = {}
+_MAX_IMAGE_CACHE = 600
+
+
 class _ImageSignals(QObject):
-    done = Signal(QImage)
+    done = Signal(str, QImage)
 
 
 class _ImageLoader(QRunnable):
@@ -372,13 +384,16 @@ class _ImageLoader(QRunnable):
         self.setAutoDelete(True)
 
     def run(self) -> None:  # runs in a worker thread
+        if self.url in _IMAGE_CACHE:
+            self.signals.done.emit(self.url, _IMAGE_CACHE[self.url])
+            return
         try:
             resp = requests.get(self.url, timeout=8,
                                 headers={"User-Agent": "NovaIPTV/1.0"})
             resp.raise_for_status()
             img = QImage.fromData(resp.content)
             if not img.isNull():
-                self.signals.done.emit(img)
+                self.signals.done.emit(self.url, img)
         except Exception:
             pass  # keep the placeholder
 
@@ -400,32 +415,50 @@ def _placeholder_pixmap(size: int) -> QPixmap:
 
 
 class LogoLabel(QLabel):
-    """QLabel that loads a remote logo asynchronously with a placeholder."""
+    """QLabel that loads a remote logo asynchronously with in-memory caching and placeholder."""
 
     _pool = QThreadPool.globalInstance()
 
     def __init__(self, size: int = 56, parent=None) -> None:
         super().__init__(parent)
         self._size = size
+        self._url = ""
         self.setFixedSize(size, size)
         self.setAlignment(Qt.AlignCenter)
         self.setPixmap(_placeholder_pixmap(size))
         self._loader: _ImageLoader | None = None
 
     def load(self, url: str) -> None:
-        self.setPixmap(_placeholder_pixmap(self._size))
+        self._url = url or ""
         if not url:
+            self.setPixmap(_placeholder_pixmap(self._size))
             return
+        if url in _IMAGE_CACHE:
+            self._apply_image(_IMAGE_CACHE[url])
+            return
+
+        self.setPixmap(_placeholder_pixmap(self._size))
         self._loader = _ImageLoader(url)
         self._loader.signals.done.connect(self._on_image)
         self._pool.start(self._loader)
 
-    def _on_image(self, img: QImage) -> None:
+    def _apply_image(self, img: QImage) -> None:
         pix = QPixmap.fromImage(img).scaled(
             self._size, self._size,
             Qt.KeepAspectRatio, Qt.SmoothTransformation,
         )
         self.setPixmap(pix)
+
+    def _on_image(self, url: str, img: QImage) -> None:
+        if url:
+            if len(_IMAGE_CACHE) >= _MAX_IMAGE_CACHE:
+                try:
+                    _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)))
+                except (StopIteration, KeyError):
+                    pass
+            _IMAGE_CACHE[url] = img
+        if self._url == url:
+            self._apply_image(img)
 
 
 # -- small building blocks ----------------------------------------------------
@@ -534,7 +567,7 @@ class SearchBar(QLineEdit):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("searchBar")
-        self.setPlaceholderText("Search channels, movies, series...")
+        self.setPlaceholderText("Search channels, movies, series... (/ to focus)")
         self.setClearButtonEnabled(True)
 
 
@@ -858,6 +891,7 @@ class _LogoArea(QWidget):
 class ChannelCard(QFrame):
     clicked = Signal(object)            # Channel
     fav_toggled = Signal(object, bool)  # Channel, new_state
+    context_menu_requested = Signal(object, object)  # Channel, global_pos
 
     def __init__(self, channel: Channel, is_fav: bool = False,
                  epg_text: str = "", parent=None) -> None:
@@ -905,6 +939,10 @@ class ChannelCard(QFrame):
             self.clicked.emit(self.channel)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.context_menu_requested.emit(self.channel, event.globalPos())
+        event.accept()
+
     def _on_fav(self, checked: bool) -> None:
         self.fav_btn.setIcon(make_icon(
             "star" if checked else "star_outline", 18,
@@ -937,6 +975,7 @@ class ChannelGrid(QWidget):
 
     channel_chosen = Signal(object)
     fav_toggled = Signal(object, bool)
+    channel_context_menu = Signal(object, object)  # Channel, global_pos
 
     CARD_MIN_WIDTH = 170
     CARD_SPACING = 12
@@ -1090,6 +1129,7 @@ class ChannelGrid(QWidget):
             card = ChannelCard(ch, ch.url in self._favorites, epg_text)
             card.clicked.connect(self.channel_chosen.emit)
             card.fav_toggled.connect(self.fav_toggled.emit)
+            card.context_menu_requested.connect(self.channel_context_menu.emit)
             card.set_locked(ch.display_group in self._locked_groups)
             card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self._grid.addWidget(card, i // cols, i % cols)

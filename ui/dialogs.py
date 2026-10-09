@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFileDialog, QTabWidget, QWidget, QSpinBox,
     QFormLayout, QDialogButtonBox, QCheckBox, QListWidget,
-    QListWidgetItem, QMessageBox,
+    QListWidgetItem, QMessageBox, QGridLayout,
 )
 
 from ui.theme import UiPrefs
@@ -358,3 +358,58 @@ class _ChangePinDialog(QDialog):
                                 "The current PIN is incorrect.")
             return
         self.accept()
+
+
+class ShortcutsDialog(QDialog):
+    """Clean reference cheat-sheet for keyboard shortcuts."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard Shortcuts")
+        self.setObjectName("shortcutsDialog")
+        self.setMinimumWidth(460)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(14)
+
+        title = QLabel("Keyboard Shortcuts")
+        title.setObjectName("dlgTitle")
+        lay.addWidget(title)
+
+        sub = QLabel("Quickly navigate, control playback, and adjust volume:")
+        sub.setObjectName("cardMeta")
+        lay.addWidget(sub)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+
+        shortcuts = [
+            ("Space", "Play / Pause stream"),
+            ("F", "Toggle Fullscreen mode"),
+            ("M", "Mute / Unmute audio"),
+            ("↑ / ↓", "Volume up / down (±5%)"),
+            ("← / →", "Prev / Next channel (or Seek ±10s in VOD)"),
+            ("/", "Focus search bar"),
+            ("Esc", "Exit Fullscreen / Close drawer / Cancel"),
+            ("? / F1", "Show this shortcuts help dialog"),
+        ]
+
+        for row, (key_label, desc) in enumerate(shortcuts):
+            k_box = QLabel(key_label)
+            k_box.setObjectName("keyBadge")
+            k_box.setAlignment(Qt.AlignCenter)
+            d_lbl = QLabel(desc)
+            d_lbl.setObjectName("keyDesc")
+            grid.addWidget(k_box, row, 0, Qt.AlignLeft)
+            grid.addWidget(d_lbl, row, 1, Qt.AlignVCenter)
+
+        lay.addLayout(grid)
+        lay.addSpacing(6)
+
+        btn = QPushButton("Got it")
+        btn.setObjectName("primaryBtn")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.accept)
+        lay.addWidget(btn, 0, Qt.AlignRight)

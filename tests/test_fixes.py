@@ -179,12 +179,51 @@ class TestFullscreenVideo(unittest.TestCase):
         self.assertEqual(fs.title_label.text(), "Test News HD")
         self.assertTrue(fs.live_badge.isVisible())
 
-        # Test back button closes fullscreen
         fs.back_btn.click()
         self.assertEqual(fs.result(), _FullscreenVideo.Accepted)
         fs.deleteLater()
         main.deleteLater()
 
+    def test_ui_ux_enhancements(self):
+        """Test LogoLabel caching, ShortcutsDialog, and new icon generation."""
+        from app.models import Channel
+        from ui.widgets import LogoLabel, _IMAGE_CACHE, make_icon, ChannelCard
+        from ui.dialogs import ShortcutsDialog
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import QPoint
+
+        # 1. Test vector icon generation for new/updated icons
+        for icon_name in ("help", "question", "volume", "mute", "back", "compress"):
+            icon = make_icon(icon_name, 20)
+            self.assertFalse(icon.isNull())
+
+        # 2. Test ShortcutsDialog
+        dlg = ShortcutsDialog()
+        self.assertIsNotNone(dlg)
+        dlg.deleteLater()
+
+        # 3. Test LogoLabel in-memory image cache
+        logo = LogoLabel(48)
+        dummy_img = QImage(48, 48, QImage.Format_RGB32)
+        dummy_img.fill(0xFF00FF)
+        test_url = "http://example.com/channel_logo.png"
+        _IMAGE_CACHE[test_url] = dummy_img
+        logo.load(test_url)
+        # Should render immediately from cache without starting network loader
+        self.assertIsNone(logo._loader)
+        logo.deleteLater()
+
+        # 4. Test ChannelCard context menu requested signal
+        ch = Channel(name="Test Channel", url="http://test.com/stream.m3u8")
+        card = ChannelCard(ch)
+        received = []
+        card.context_menu_requested.connect(lambda c, pos: received.append((c, pos)))
+        card.context_menu_requested.emit(ch, QPoint(100, 200))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0].name, "Test Channel")
+        card.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()
+

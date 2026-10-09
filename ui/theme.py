@@ -146,9 +146,11 @@ QFrame#channelCard {{
     border-radius: 14px;
 }}
 QFrame#channelCard:hover {{
+    background: #232938;
     border: 1px solid {c["accent"]};
 }}
 QFrame#channelCard[selected="true"] {{
+    background: #252b3d;
     border: 2px solid {c["accent"]};
 }}
 QWidget#logoWrap {{
@@ -213,6 +215,7 @@ QFrame#posterCard {{
     border-radius: 14px;
 }}
 QFrame#posterCard:hover {{
+    background: #232938;
     border: 1px solid {c["accent"]};
 }}
 QProgressBar#miniProgress {{
@@ -487,6 +490,21 @@ QSlider::sub-page:horizontal {{
     background: {c["accent"]};
     border-radius: 3px;
 }}
+QSlider#npSlider::groove:horizontal {{
+    height: 4px;
+    background: {c["surface"]};
+    border-radius: 2px;
+}}
+QSlider#npSlider::handle:horizontal {{
+    width: 12px; height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+    background: {c["accent"]};
+}}
+QSlider#npSlider::sub-page:horizontal {{
+    background: {c["accent"]};
+    border-radius: 2px;
+}}
 QScrollBar:vertical {{
     background: transparent;
     width: 10px;
@@ -523,6 +541,26 @@ QDialog {{
 QDialog QLabel {{
     color: {c["text"]};
 }}
+QDialog#shortcutsDialog {{
+    background: {c["surface"]};
+    border: 1px solid {c["border"]};
+    border-radius: 14px;
+}}
+QLabel#keyBadge {{
+    background: {c["card"]};
+    color: {c["accent"]};
+    border: 1px solid #313847;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 9pt;
+    font-weight: 700;
+    font-family: "Consolas", "Courier New", monospace;
+    min-width: 60px;
+}}
+QLabel#keyDesc {{
+    font-size: 10pt;
+    color: {c["text"]};
+}}
 QLineEdit, QSpinBox {{
     background: {c["surface2"]};
     border: 1px solid {c["border"]};
@@ -548,14 +586,22 @@ QListWidget::item:selected {{
 QMenu {{
     background: {c["card"]};
     border: 1px solid {c["border"]};
+    border-radius: 10px;
     padding: 6px;
 }}
 QMenu::item {{
     padding: 8px 18px;
     border-radius: 6px;
+    color: {c["text"]};
 }}
 QMenu::item:selected {{
-    background: {c["surface2"]};
+    background: {c["accent"]};
+    color: white;
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {c["border"]};
+    margin: 4px 6px;
 }}
 QCheckBox {{
     spacing: 8px;

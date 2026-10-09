@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     Qt, QThread, Signal, QPoint, QTimer, QPropertyAnimation,
     QAbstractAnimation, QUrl, QStandardPaths, QEvent,
 )
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QPushButton,
     QStackedWidget, QLabel, QSlider, QComboBox, QMessageBox,
@@ -40,7 +40,7 @@ from app.playlist import (
 from app.profiles import ProfileStore, ProviderProfile, migrate_legacy
 from app.resume import ResumeStore
 from app.xtream import XtreamClient, XtreamError
-from ui.dialogs import AddPlaylistDialog, SettingsDialog, PinDialog
+from ui.dialogs import AddPlaylistDialog, SettingsDialog, PinDialog, ShortcutsDialog
 from ui.login import LoginScreen
 from ui.theme import COLORS, animations_enabled
 from ui.widgets import (
@@ -955,6 +955,12 @@ class MainWindow(QMainWindow):
         self._rec_timer = QTimer(self)
         self._rec_timer.setInterval(1000)
         self._rec_timer.timeout.connect(self._update_rec_elapsed)
+        # search debouncer (smooth typing on large playlists)
+        self._search_timer = QTimer(self)
+        self._search_timer.setInterval(220)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._run_search)
+        self._np_slider_dragging = False
 
         self._build_ui()
         self._connect_player()
@@ -1058,7 +1064,8 @@ class MainWindow(QMainWindow):
 
         self.search = SearchBar()
         self.search.setFixedWidth(420)
-        self.search.textChanged.connect(self._on_search)
+        self.search.textChanged.connect(self._on_search_changed)
+        self.search.returnPressed.connect(self._on_search_immediate)
         lay.addWidget(self.search)
         self._search_idx = lay.indexOf(self.search)
         self._search_btn = IconButton("search", 20)
@@ -1067,6 +1074,11 @@ class MainWindow(QMainWindow):
         self._search_btn.hide()
         lay.addWidget(self._search_btn)
         lay.addStretch(1)
+
+        help_btn = IconButton("help", 20)
+        help_btn.setToolTip("Keyboard shortcuts (?)")
+        help_btn.clicked.connect(self._show_shortcuts_dialog)
+        lay.addWidget(help_btn)
 
         self.bell_btn = IconButton("bell", 20)
         self.bell_btn.setToolTip("Notifications")
@@ -1351,6 +1363,11 @@ class MainWindow(QMainWindow):
         self.thumb_video.clear()
         self.np_title.setText("Nothing playing")
         self.np_meta.setText("")
+        if hasattr(self, "np_seek_row"):
+            self.np_seek_row.hide()
+            self.np_time_now.setText("0:00")
+            self.np_time_dur.setText("0:00")
+            self.np_slider.setValue(0)
         self.pp_btn.setIcon(make_icon("play", 18))
         self._hide_account_banner()
         self._close_series_detail()
@@ -1549,6 +1566,16 @@ class MainWindow(QMainWindow):
             else:
                 self.search.setFocus()
                 self.search.selectAll()
+        elif key == Qt.Key_Up:
+            v = min(125, self.vol.value() + 5)
+            self.vol.setValue(v)
+            self._flash_status(f"Volume: {v}%", 1500)
+        elif key == Qt.Key_Down:
+            v = max(0, self.vol.value() - 5)
+            self.vol.setValue(v)
+            self._flash_status(f"Volume: {v}%", 1500)
+        elif key in (Qt.Key_Question, Qt.Key_F1):
+            self._show_shortcuts_dialog()
         else:
             handled = False
         if handled:
@@ -1892,6 +1919,7 @@ class MainWindow(QMainWindow):
         grid = ChannelGrid(columns=4)
         grid.channel_chosen.connect(partial(self._play_from, key))
         grid.fav_toggled.connect(self._on_fav_toggled)
+        grid.channel_context_menu.connect(self._show_channel_context_menu)
         lay.addWidget(grid, 1)
         self.grids[key] = grid
         return page
@@ -2082,6 +2110,33 @@ class MainWindow(QMainWindow):
         self.np_meta = QLabel("")
         self.np_meta.setObjectName("cardMeta")
         cl.addWidget(self.np_meta)
+
+        # Mini seek row for VOD (movies/series)
+        self.np_seek_row = QWidget()
+        sl_lay = QVBoxLayout(self.np_seek_row)
+        sl_lay.setContentsMargins(0, 4, 0, 0)
+        sl_lay.setSpacing(4)
+        time_row = QHBoxLayout()
+        self.np_time_now = QLabel("0:00")
+        self.np_time_now.setObjectName("cardMeta")
+        self.np_time_dur = QLabel("0:00")
+        self.np_time_dur.setObjectName("cardMeta")
+        time_row.addWidget(self.np_time_now)
+        time_row.addStretch(1)
+        time_row.addWidget(self.np_time_dur)
+        sl_lay.addLayout(time_row)
+
+        self.np_slider = QSlider(Qt.Horizontal)
+        self.np_slider.setObjectName("npSlider")
+        self.np_slider.setRange(0, 1000)
+        self.np_slider.setValue(0)
+        self.np_slider.sliderPressed.connect(self._on_np_slider_pressed)
+        self.np_slider.sliderReleased.connect(self._on_np_slider_released)
+        self.np_slider.sliderMoved.connect(self._on_np_slider_moved)
+        sl_lay.addWidget(self.np_slider)
+        self.np_seek_row.hide()
+        cl.addWidget(self.np_seek_row)
+
         self.rec_label = QLabel("")
         self.rec_label.setObjectName("recLabel")
         self.rec_label.setVisible(False)
@@ -2105,9 +2160,8 @@ class MainWindow(QMainWindow):
         lay.addLayout(transport)
 
         vol_row = QHBoxLayout()
-        self.mute_btn = IconButton("signal", 18)
-        # reuse: show volume state via text-less icon button
-        self.mute_btn.setIcon(make_icon("signal", 18, COLORS["muted"]))
+        self.mute_btn = IconButton("volume", 18)
+        self.mute_btn.setIcon(make_icon("volume", 18, COLORS["muted"]))
         self.mute_btn.setToolTip("Mute")
         self.mute_btn.clicked.connect(self._toggle_mute)
         vol_row.addWidget(self.mute_btn)
@@ -2239,12 +2293,27 @@ class MainWindow(QMainWindow):
         except Exception:
             page.setGraphicsEffect(None)
 
-    def _on_search(self, text: str) -> None:
+    def _on_search_changed(self, text: str) -> None:
+        if not text:
+            self._search_timer.stop()
+            self._run_search()
+        else:
+            self._search_timer.start()
+
+    def _on_search_immediate(self) -> None:
+        self._search_timer.stop()
+        self._run_search()
+
+    def _run_search(self) -> None:
+        text = self.search.text()
         if self._current_page == "home" and text.strip():
             self._navigate("live")
             return
         if self._current_page in ("live", "movie", "series", "favorites"):
             self._refresh_grid()
+
+    def _on_search(self, text: str) -> None:
+        self._run_search()
 
     def _on_category_changed(self, text: str) -> None:
         group = "" if text == "All categories" else text
@@ -2456,6 +2525,7 @@ class MainWindow(QMainWindow):
             card.clicked.connect(
                 lambda c=ch: self.play_channel(c, self._live_channels()))
             card.fav_toggled.connect(self._on_fav_toggled)
+            card.context_menu_requested.connect(self._show_channel_context_menu)
             card.set_locked(self._is_locked(ch))
             self.home_live_row.addWidget(card)
         self.home_live_row.addStretch(1)
@@ -2556,6 +2626,51 @@ class MainWindow(QMainWindow):
         if self._current_page == "favorites":
             self._refresh_grid()
         self._refresh_fav_mini()
+
+    def _show_shortcuts_dialog(self) -> None:
+        dlg = ShortcutsDialog(self)
+        dlg.exec()
+
+    def _show_channel_context_menu(self, channel: Channel, pos: QPoint) -> None:
+        menu = QMenu(self)
+
+        play_act = menu.addAction(make_icon("play", 16), f"Play '{channel.name}'")
+        play_act.triggered.connect(lambda: self.play_channel(channel, self._visible_channels()))
+
+        is_fav = channel.url in self.favorites.all()
+        fav_icon = make_icon("star" if is_fav else "star_outline", 16,
+                             COLORS["accent"] if is_fav else COLORS["text"])
+        fav_text = "Remove from Favorites" if is_fav else "Add to Favorites"
+        fav_act = menu.addAction(fav_icon, fav_text)
+        fav_act.triggered.connect(lambda: self._on_fav_toggled(channel, not is_fav))
+
+        menu.addSeparator()
+
+        copy_url_act = menu.addAction(make_icon("list", 16), "Copy Stream URL")
+        copy_url_act.triggered.connect(
+            lambda: self._copy_to_clipboard(channel.url, "Stream URL copied to clipboard"))
+
+        copy_name_act = menu.addAction(make_icon("tv", 16), "Copy Channel Name")
+        copy_name_act.triggered.connect(
+            lambda: self._copy_to_clipboard(channel.name, f"Copied '{channel.name}'"))
+
+        if channel.kind == "movie":
+            menu.addSeparator()
+            details_act = menu.addAction(make_icon("film", 16), "Movie Details…")
+            details_act.triggered.connect(lambda: self._open_movie_details(channel))
+        elif channel.kind == "series" and channel.series_id:
+            menu.addSeparator()
+            series_act = menu.addAction(make_icon("layers", 16), "View Episodes…")
+            series_act.triggered.connect(lambda: self._open_series_detail(channel))
+
+        menu.exec(pos)
+
+    def _copy_to_clipboard(self, text: str, msg: str) -> None:
+        if text:
+            cb = QGuiApplication.clipboard()
+            if cb is not None:
+                cb.setText(text)
+            self._flash_status(msg, 3000)
 
     # -- catch-up -----------------------------------------------------------------
     def _catchup_empty(self, icon: str, title: str, sub: str,
@@ -2685,6 +2800,11 @@ class MainWindow(QMainWindow):
         self._current_channel = channel
 
         self.thumb_video.clear()
+        if hasattr(self, "np_seek_row"):
+            self.np_seek_row.hide()
+            self.np_time_now.setText("0:00")
+            self.np_time_dur.setText("0:00")
+            self.np_slider.setValue(0)
         self.player.play(channel.url, channel.stream_headers)
         self.player.set_volume(self.vol.value())
         self.player.set_mute(self._muted)
@@ -2873,13 +2993,37 @@ class MainWindow(QMainWindow):
     def _update_mute_icon(self) -> None:
         self._muted = self.config.muted
         self.mute_btn.setIcon(make_icon(
-            "close" if self._muted else "signal", 18,
+            "mute" if self._muted else "volume", 18,
             COLORS["red"] if self._muted else COLORS["muted"]))
         self.mute_btn.setToolTip("Unmute" if self._muted else "Mute")
+
+    def _on_np_slider_pressed(self) -> None:
+        self._np_slider_dragging = True
+
+    def _on_np_slider_moved(self, val: int) -> None:
+        self.np_time_now.setText(_fmt_time(val))
+
+    def _on_np_slider_released(self) -> None:
+        self._np_slider_dragging = False
+        target_s = float(self.np_slider.value())
+        self.player.seek(target_s)
 
     def _on_position(self, pos_ms: int, dur_ms: int) -> None:
         if self._current_channel:
             self._progress[self._current_channel.url] = (pos_ms, dur_ms)
+            is_vod = (self._current_channel.kind in ("movie", "series") or dur_ms > 0)
+            if hasattr(self, "np_seek_row"):
+                if is_vod and dur_ms > 0:
+                    self.np_seek_row.show()
+                    if not self._np_slider_dragging:
+                        self.np_slider.blockSignals(True)
+                        self.np_slider.setRange(0, max(1, dur_ms // 1000))
+                        self.np_slider.setValue(pos_ms // 1000)
+                        self.np_slider.blockSignals(False)
+                        self.np_time_now.setText(_fmt_time(pos_ms / 1000))
+                        self.np_time_dur.setText(_fmt_time(dur_ms / 1000))
+                else:
+                    self.np_seek_row.hide()
         # resume-seek: the engine may need a moment before seek() works;
         # retry on each position report for ~5 s, then play from the start.
         if self._pending_resume_seek is not None:
@@ -2903,6 +3047,11 @@ class MainWindow(QMainWindow):
             self.pp_btn.setIcon(make_icon("play", 18))
         elif state in ("stopped", "error"):
             self.pp_btn.setIcon(make_icon("play", 18))
+            if hasattr(self, "np_seek_row"):
+                self.np_seek_row.hide()
+                self.np_time_now.setText("0:00")
+                self.np_time_dur.setText("0:00")
+                self.np_slider.setValue(0)
         self.rec_btn.setEnabled(
             state in ("playing", "paused", "buffering")
             and self._current_channel is not None)
