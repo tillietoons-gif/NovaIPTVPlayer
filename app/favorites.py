@@ -51,5 +51,15 @@ class FavoritesStore:
         self.save()
         return state
 
+    def add(self, channel_url: str) -> None:
+        """Add channel to favorites."""
+        self._favs.add(channel_url)
+        self.save()
+
+    def remove(self, channel_url: str) -> None:
+        """Remove channel from favorites."""
+        self._favs.discard(channel_url)
+        self.save()
+
     def all(self) -> set[str]:
         return set(self._favs)

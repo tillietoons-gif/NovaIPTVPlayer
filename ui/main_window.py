@@ -51,6 +51,7 @@ from ui.widgets import (
     SectionHeader, StatPill, ChannelCard, PosterCard, HeroCard,
     LogoLabel, brand_pixmap, avatar_pixmap, make_icon, poster_pixmap,
     ElidedLabel, EmptyState, SkeletonCard, Drawer, AudioVisualizer,
+    StreamStatsHud, VolumeToast, ChannelNumberOsd, QuickZapperOverlay,
 )
 
 
@@ -542,6 +543,7 @@ class _FullscreenVideo(QDialog):
         self._current_dur_ms = 0
         self._auto_play_banner: _AutoPlayNextBanner | None = None
         self._auto_play_shown = False
+        self._digits_buffer = ""
 
         # Video surface (fills full dialog)
         self.video = VideoWidget(self, placeholder="")
@@ -566,6 +568,23 @@ class _FullscreenVideo(QDialog):
         self._toast_timer.setSingleShot(True)
         self._toast_timer.setInterval(1800)
         self._toast_timer.timeout.connect(self._toast.hide)
+
+        # Advanced player OSD HUDs and overlays
+        self.vol_toast = VolumeToast(self)
+        self.ch_osd = ChannelNumberOsd(self)
+        self.stats_hud = StreamStatsHud(self)
+        self.stats_hud.hide()
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setInterval(1000)
+        self._stats_timer.timeout.connect(self._update_stats_hud)
+
+        self.zapper = QuickZapperOverlay(self)
+        self.zapper.channel_selected.connect(self._on_zapper_tune)
+
+        self._digits_timer = QTimer(self)
+        self._digits_timer.setSingleShot(True)
+        self._digits_timer.setInterval(1200)
+        self._digits_timer.timeout.connect(self._tune_by_digits)
 
         # Build overlay bars
         self._build_top_bar()
@@ -739,6 +758,22 @@ class _FullscreenVideo(QDialog):
 
         ctrl_lay.addStretch(1)
 
+        # Quick Channel Zapper (TiviMate style)
+        self.zapper_btn = self._fs_btn("zap", 18, "Quick Channel Zapper (Z / Enter)", self._toggle_zapper)
+        ctrl_lay.addWidget(self.zapper_btn)
+
+        # Stream Diagnostics / Stats for Nerds HUD
+        self.stats_btn = self._fs_btn("info", 18, "Stream Diagnostics (I)", self._toggle_stats_hud)
+        ctrl_lay.addWidget(self.stats_btn)
+
+        # Playback Speed selector
+        self.speed_btn = self._fs_btn("speed", 18, "Playback Speed (1.0x)", self._show_speed_menu)
+        ctrl_lay.addWidget(self.speed_btn)
+
+        # Sleep Timer
+        self.sleep_btn = self._fs_btn("timer", 18, "Sleep Timer (T)", self._show_sleep_menu)
+        ctrl_lay.addWidget(self.sleep_btn)
+
         # Aspect Ratio button
         cur_asp = self.video.aspect_ratio().upper()
         self.aspect_btn = self._fs_btn("aspect", 18, f"Aspect Ratio: {cur_asp} (A)", self._toggle_aspect)
@@ -798,6 +833,119 @@ class _FullscreenVideo(QDialog):
         """)
         b.clicked.connect(slot)
         return b
+
+    def _position_overlays(self) -> None:
+        w, h = self.width(), self.height()
+        if hasattr(self, "zapper"):
+            self.zapper.setGeometry(0, 0, min(420, w), h)
+        if hasattr(self, "stats_hud"):
+            hud_w = min(420, w - 40)
+            hud_h = min(480, h - 160)
+            self.stats_hud.setGeometry(w - hud_w - 20, 70, hud_w, hud_h)
+        if hasattr(self, "vol_toast"):
+            self.vol_toast.move((w - self.vol_toast.width()) // 2, (h - self.vol_toast.height()) // 2)
+        if hasattr(self, "ch_osd"):
+            self.ch_osd.move(w - self.ch_osd.width() - 40, 70)
+
+    def _toggle_zapper(self) -> None:
+        if self.zapper.isVisible():
+            self.zapper.hide()
+        else:
+            channels = self.main._visible_channels() if hasattr(self.main, "_visible_channels") else self.main.channels
+            if not channels:
+                channels = self.main.channels
+            self.zapper.set_channels(channels, self.main._current_channel)
+            self._position_overlays()
+            self.zapper.show()
+            self.zapper.raise_()
+            self.zapper.search_input.setFocus()
+
+    def _on_zapper_tune(self, channel: Channel) -> None:
+        self.main.play_channel(channel, self.main._play_context)
+        self._update_channel_info()
+        self._show_toast(f"Tuned: {channel.name}")
+
+    def _toggle_stats_hud(self) -> None:
+        if self.stats_hud.isVisible():
+            self.stats_hud.hide()
+            self._stats_timer.stop()
+        else:
+            self._update_stats_hud()
+            self._position_overlays()
+            self.stats_hud.show()
+            self.stats_hud.raise_()
+            self._stats_timer.start()
+
+    def _update_stats_hud(self) -> None:
+        if not self.stats_hud.isVisible():
+            return
+        info = self.main.player.media_info()
+        ch = self.main._current_channel
+        if ch:
+            info["channel"] = ch.name
+            info["stream_url"] = ch.url
+        self.stats_hud.update_stats(info)
+
+    def _show_speed_menu(self) -> None:
+        menu = QMenu(self)
+        speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        cur_spd = self.main.player.speed
+        for s in speeds:
+            act = menu.addAction(f"{s}x")
+            act.setCheckable(True)
+            act.setChecked(abs(cur_spd - s) < 0.05)
+            act.triggered.connect(partial(self._set_speed, s))
+        pt = self.speed_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6))
+        menu.exec(pt)
+
+    def _set_speed(self, speed: float) -> None:
+        self.main.player.set_speed(speed)
+        self.speed_btn.setToolTip(f"Playback Speed ({speed}x)")
+        self._show_toast(f"Speed: {speed}x")
+
+    def _show_sleep_menu(self) -> None:
+        menu = QMenu(self)
+        options = [
+            ("Off (Disabled)", 0),
+            ("15 Minutes", 15),
+            ("30 Minutes", 30),
+            ("45 Minutes", 45),
+            ("60 Minutes (1 Hour)", 60),
+            ("90 Minutes (1.5 Hours)", 90),
+            ("120 Minutes (2 Hours)", 120),
+        ]
+        active_mins = getattr(self.main, "_sleep_timer_minutes", 0)
+        for label, mins in options:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(active_mins == mins)
+            act.triggered.connect(partial(self.main._set_sleep_timer, mins))
+        pt = self.sleep_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6))
+        menu.exec(pt)
+
+    def _handle_channel_digit(self, digit: str) -> None:
+        self._digits_buffer += digit
+        self.ch_osd.show_digits(self._digits_buffer)
+        self._position_overlays()
+        self._digits_timer.start()
+
+    def _tune_by_digits(self) -> None:
+        if not self._digits_buffer:
+            return
+        try:
+            num = int(self._digits_buffer)
+            channels = self.main.channels
+            target = None
+            if 1 <= num <= len(channels):
+                target = channels[num - 1]
+            if target is not None:
+                self.main.play_channel(target)
+                self._update_channel_info()
+                self._show_toast(f"CH {num}: {target.name}")
+        except ValueError:
+            pass
+        finally:
+            self._digits_buffer = ""
 
     def _toggle_aspect(self) -> None:
         modes = ["auto", "16:9", "4:3", "fill"]
@@ -881,6 +1029,7 @@ class _FullscreenVideo(QDialog):
         self.bottom_bar.setGeometry(0, h - bot_h, w, bot_h)
         self.top_bar.raise_()
         self.bottom_bar.raise_()
+        self._position_overlays()
         if self._toast.isVisible():
             self._toast.move((w - self._toast.width()) // 2, h - 130)
             self._toast.raise_()
@@ -900,6 +1049,10 @@ class _FullscreenVideo(QDialog):
         if self.top_bar.underMouse() or self.bottom_bar.underMouse():
             return
         if self._auto_play_banner and self._auto_play_banner.underMouse():
+            return
+        if hasattr(self, "zapper") and self.zapper.isVisible():
+            return
+        if hasattr(self, "stats_hud") and self.stats_hud.isVisible():
             return
         self.top_bar.hide()
         self.bottom_bar.hide()
@@ -940,11 +1093,15 @@ class _FullscreenVideo(QDialog):
         self.main._toggle_mute()
         self._update_volume_ui()
         self._show_controls()
+        self._position_overlays()
+        self.vol_toast.show_volume(self.main.config.volume, self.main._muted)
 
     def _on_vol_changed(self, val: int) -> None:
         self.main._on_volume(val)
         self._update_volume_ui()
         self._show_controls()
+        self._position_overlays()
+        self.vol_toast.show_volume(val, self.main._muted)
 
     def _update_volume_ui(self) -> None:
         muted = self.main._muted
@@ -1070,6 +1227,14 @@ class _FullscreenVideo(QDialog):
             self.accept()
         elif key == Qt.Key_Space:
             self._on_play_pause()
+        elif key == Qt.Key_Z or (key == Qt.Key_Return and not self.zapper.hasFocus()):
+            self._toggle_zapper()
+        elif key == Qt.Key_I:
+            self._toggle_stats_hud()
+        elif key == Qt.Key_T:
+            self._show_sleep_menu()
+        elif Qt.Key_0 <= key <= Qt.Key_9:
+            self._handle_channel_digit(chr(key))
         elif key == Qt.Key_A:
             self._toggle_aspect()
         elif key in (Qt.Key_C, Qt.Key_S):
@@ -1105,6 +1270,10 @@ class _FullscreenVideo(QDialog):
     def done(self, r: int) -> None:
         self.unsetCursor()
         self._hide_timer.stop()
+        if hasattr(self, "_stats_timer"):
+            self._stats_timer.stop()
+        if hasattr(self, "_digits_timer"):
+            self._digits_timer.stop()
         if self._auto_play_banner:
             self._auto_play_banner.stop()
             self._auto_play_banner.deleteLater()
@@ -1123,6 +1292,60 @@ class _FullscreenVideo(QDialog):
             self.main.player.playback_finished.disconnect(self._on_playback_finished)
         except (RuntimeError, TypeError):
             pass
+        super().done(r)
+
+
+class _QuickZapperDialog(QDialog):
+    """Standalone Quick Channel Zapper dialog for windowed mode."""
+
+    def __init__(self, channels: list[Channel], current: Channel | None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Quick Channel Zapper")
+        self.setFixedSize(440, 580)
+        self.setStyleSheet(f"background: {COLORS['bg']}; border-radius: 12px;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.zapper = QuickZapperOverlay(self)
+        self.zapper.set_channels(channels, current)
+        self.zapper.channel_selected.connect(self._on_selected)
+        lay.addWidget(self.zapper)
+        self.selected_channel: Channel | None = None
+
+    def _on_selected(self, ch: Channel) -> None:
+        self.selected_channel = ch
+        self.accept()
+
+
+class _StreamStatsDialog(QDialog):
+    """Real-time Stream Diagnostics ("Stats for Nerds") dialog for windowed mode."""
+
+    def __init__(self, player: Player, channel: Channel | None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Stream Diagnostics — Stats for Nerds")
+        self.setFixedSize(460, 480)
+        self.setStyleSheet(f"background: {COLORS['surface']}; border-radius: 12px;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        self.hud = StreamStatsHud(self)
+        self.hud.close_btn.clicked.connect(self.accept)
+        lay.addWidget(self.hud)
+        self.player = player
+        self.channel = channel
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._refresh)
+        self.timer.start()
+        self._refresh()
+
+    def _refresh(self) -> None:
+        info = self.player.media_info()
+        if self.channel:
+            info["channel"] = self.channel.name
+            info["stream_url"] = self.channel.url
+        self.hud.update_stats(info)
+
+    def done(self, r: int) -> None:
+        self.timer.stop()
         super().done(r)
 
 
@@ -1370,7 +1593,7 @@ NAV_ITEMS = [
     ("playlists", "Providers", "list"),
 ]
 
-MEDIA_PAGES = tuple(k for k, _label, _icon in NAV_ITEMS)
+MEDIA_PAGES = tuple(k for k, _label, _icon in NAV_ITEMS) + ("search",)
 
 
 class MainWindow(QMainWindow):
@@ -1415,6 +1638,7 @@ class MainWindow(QMainWindow):
         self.history = HistoryStore()
         self._progress: dict[str, tuple[int, int]] = {}  # url -> (pos_ms, dur_ms)
         self._current_page = "home"
+        self._pre_search_page = "home"
         self._current_kind: str | None = "live"
         self._current_category = ""
         self._context_lists: dict[str, list[Channel]] = {}
@@ -1452,6 +1676,18 @@ class MainWindow(QMainWindow):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._run_search)
         self._np_slider_dragging = False
+
+        # Sleep timer state
+        self._sleep_timer_minutes = 0
+        self._sleep_seconds_remaining = 0
+        self._sleep_countdown_timer = QTimer(self)
+        self._sleep_countdown_timer.setInterval(1000)
+        self._sleep_countdown_timer.timeout.connect(self._on_sleep_tick)
+
+        # Grid sort & filter state
+        self._grid_sort_mode: str = "default"
+        self._grid_quality_filter: str = "all"
+        self._chip_buttons: dict[str, list[tuple[QPushButton, str]]] = {}
 
         self._build_ui()
         self._connect_player()
@@ -1513,6 +1749,8 @@ class MainWindow(QMainWindow):
             page = self._build_page(key)
             self._pages[key] = page
             self.stack.addWidget(page)
+        self._pages["search"] = self._build_search_page()
+        self.stack.addWidget(self._pages["search"])
         content_lay.addWidget(self.stack, 1)
         content_lay.addWidget(self._build_statusbar())
 
@@ -1565,6 +1803,14 @@ class MainWindow(QMainWindow):
 
         self.conn_pill = StatPill()
         lay.addWidget(self.conn_pill)
+
+        self.sleep_badge = QPushButton("")
+        self.sleep_badge.setObjectName("sleepTimerBadge")
+        self.sleep_badge.setCursor(Qt.PointingHandCursor)
+        self.sleep_badge.clicked.connect(self._show_window_sleep_menu)
+        self.sleep_badge.hide()
+        lay.addWidget(self.sleep_badge)
+
         lay.addStretch(1)
 
         self.search = SearchBar()
@@ -2131,6 +2377,12 @@ class MainWindow(QMainWindow):
             self._flash_status(f"Volume: {v}%", 1500)
         elif key == Qt.Key_BracketLeft:
             self._toggle_sidebar_compact()
+        elif key == Qt.Key_Z:
+            self._open_quick_zapper()
+        elif key == Qt.Key_I:
+            self._show_stats_dialog()
+        elif key == Qt.Key_T:
+            self._show_window_sleep_menu()
         elif key in (Qt.Key_Question, Qt.Key_F1):
             self._show_shortcuts_dialog()
 
@@ -2471,11 +2723,48 @@ class MainWindow(QMainWindow):
         head.addWidget(self._count_labels[key])
         if key in ("live", "movie", "series"):
             cat = QComboBox()
+            cat.setObjectName("catBox")
             cat.addItem("All categories")
             cat.currentTextChanged.connect(self._on_category_changed)
             head.addWidget(cat)
             self.category_boxes[key] = cat
+
+        # Sort Dropdown
+        sort_box = QComboBox()
+        sort_box.setObjectName("catBox")
+        sort_box.setToolTip("Sort channels")
+        sort_box.addItem("Default Order", "default")
+        sort_box.addItem("Name (A → Z)", "az")
+        sort_box.addItem("Name (Z → A)", "za")
+        sort_box.addItem("4K UHD First", "4k")
+        sort_box.currentIndexChanged.connect(self._on_sort_changed)
+        head.addWidget(sort_box)
+
         lay.addLayout(head)
+
+        # Quick Filter Chips Row (All, Favorites, 4K UHD, FHD)
+        chip_bar = QHBoxLayout()
+        chip_bar.setSpacing(6)
+        chips = [
+            ("All", "all"),
+            ("★ Favorites", "favs"),
+            ("4K UHD", "4k"),
+            ("FHD 1080p", "fhd"),
+        ]
+        if not hasattr(self, "_chip_buttons"):
+            self._chip_buttons = {}
+        self._chip_buttons[key] = []
+        for label, val in chips:
+            btn = QPushButton(label)
+            btn.setObjectName("filterChip")
+            btn.setCheckable(True)
+            btn.setChecked(val == self._grid_quality_filter)
+            btn.clicked.connect(partial(self._on_filter_chip_clicked, val))
+            chip_bar.addWidget(btn)
+            self._chip_buttons[key].append((btn, val))
+        chip_bar.addStretch(1)
+        lay.addLayout(chip_bar)
+
         grid = ChannelGrid(columns=4)
         grid.channel_chosen.connect(partial(self._play_from, key))
         grid.fav_toggled.connect(self._on_fav_toggled)
@@ -2483,6 +2772,37 @@ class MainWindow(QMainWindow):
         lay.addWidget(grid, 1)
         self.grids[key] = grid
         return page
+
+    def _build_search_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 18, 26, 18)
+        lay.setSpacing(10)
+        head = self._page_header("Search Results")
+        self._count_labels["search"] = QLabel("")
+        self._count_labels["search"].setObjectName("cardMeta")
+        head.addWidget(self._count_labels["search"])
+        lay.addLayout(head)
+        grid = ChannelGrid(columns=4)
+        grid.channel_chosen.connect(partial(self._play_from, "search"))
+        grid.fav_toggled.connect(self._on_fav_toggled)
+        grid.channel_context_menu.connect(self._show_channel_context_menu)
+        lay.addWidget(grid, 1)
+        self.grids["search"] = grid
+        return page
+
+    def _show_search_results(self) -> None:
+        self.stack.setCurrentWidget(self._pages["search"])
+        self._current_page = "search"
+        self._current_kind = None
+        self._current_category = ""
+        for btn in self._nav_btns.values():
+            btn.setChecked(False)
+        self._update_panel_visibility()
+        if self._panel_mode == "drawer":
+            self._drawer.hide()
+        self._fade_page_in(self._pages["search"])
+        self._refresh_grid()
 
     def _build_guide_page(self) -> QWidget:
         page = QWidget()
@@ -2652,7 +2972,8 @@ class MainWindow(QMainWindow):
         now = datetime.now(timezone.utc)
 
         # 2. Channel rows (render up to 60 live channels for fluid scrolling)
-        for ch in live_channels[:60]:
+        shown_channels = live_channels[:60]
+        for ch in shown_channels:
             row = QFrame()
             row.setObjectName("sideCard")
             row.setFixedHeight(54)
@@ -2775,6 +3096,16 @@ class MainWindow(QMainWindow):
             row_lay.addWidget(prog_container)
             row_lay.addStretch(1)
             self.guide_lay.addWidget(row)
+
+        if len(live_channels) > len(shown_channels):
+            more = QLabel(
+                f"Showing {len(shown_channels)} of {len(live_channels)} channels. "
+                "Use the category filter to narrow the guide."
+            )
+            more.setStyleSheet(
+                f"color: {COLORS['muted']}; padding: 10px 8px; font-size: 9pt;"
+            )
+            self.guide_lay.addWidget(more)
 
         self.guide_lay.addStretch(1)
 
@@ -3083,6 +3414,31 @@ class MainWindow(QMainWindow):
         util_row.addWidget(self.rec_btn)
         lay.addLayout(util_row)
 
+        # Pro IPTV Tools row (Zapper, Stream Diagnostics, Playback Speed, Sleep Timer)
+        pro_row = QHBoxLayout()
+        pro_row.setSpacing(6)
+        pro_row.setAlignment(Qt.AlignCenter)
+
+        zap_slot = getattr(self, "_open_quick_zapper", lambda: None)
+        stats_slot = getattr(self, "_show_stats_dialog", lambda: None)
+        speed_slot = getattr(self, "_show_window_speed_menu", lambda: None)
+        sleep_slot = getattr(self, "_show_window_sleep_menu", lambda: None)
+
+        self.zap_btn = self._tbtn("zap", zap_slot, size=32)
+        self.zap_btn.setToolTip("Quick Channel Zapper (Z)")
+        self.stats_btn = self._tbtn("info", stats_slot, size=32)
+        self.stats_btn.setToolTip("Stream Diagnostics / Stats for Nerds (I)")
+        self.speed_btn = self._tbtn("speed", speed_slot, size=32)
+        self.speed_btn.setToolTip("Playback Speed (1.0x)")
+        self.sleep_btn = self._tbtn("timer", sleep_slot, size=32)
+        self.sleep_btn.setToolTip("Sleep Timer (T)")
+
+        pro_row.addWidget(self.zap_btn)
+        pro_row.addWidget(self.stats_btn)
+        pro_row.addWidget(self.speed_btn)
+        pro_row.addWidget(self.sleep_btn)
+        lay.addLayout(pro_row)
+
         # Volume row
         vol_row = QHBoxLayout()
         vol_row.setSpacing(8)
@@ -3242,9 +3598,19 @@ class MainWindow(QMainWindow):
         self._run_search()
 
     def _run_search(self) -> None:
-        text = self.search.text()
-        if self._current_page == "home" and text.strip():
-            self._navigate("live")
+        text = self.search.text().strip()
+        if text:
+            if self._current_page != "search":
+                self._pre_search_page = self._current_page
+                self._show_search_results()
+            else:
+                self._refresh_grid()
+            return
+        if self._current_page == "search":
+            target = self._pre_search_page
+            if target == "search" or target not in self._pages:
+                target = "home"
+            self._navigate(target)
             return
         if self._current_page in ("live", "movie", "series", "favorites"):
             self._refresh_grid()
@@ -3492,25 +3858,169 @@ class MainWindow(QMainWindow):
 
     # -- grids / search / favorites -------------------------------------------
     def _visible_channels(self) -> list[Channel]:
-        if self._current_kind is None:  # favorites page
+        if self._current_page == "search":
+            base = filter_channels(self.channels, query=self.search.text())
+        elif self._current_kind is None:  # favorites page
             favs = self.favorites.all()
             base = [c for c in self.channels if c.url in favs]
-            return filter_channels(base, query=self.search.text())
-        return filter_channels(
-            self.channels,
-            query=self.search.text(),
-            category=self._current_category,
-            kind=self._current_kind,
-        )
+            base = filter_channels(base, query=self.search.text())
+        else:
+            base = filter_channels(
+                self.channels,
+                query=self.search.text(),
+                category=self._current_category,
+                kind=self._current_kind,
+            )
+
+        # Apply quality filter chip
+        qf = getattr(self, "_grid_quality_filter", "all")
+        if qf == "favs":
+            fav_set = set(self.favorites.all())
+            base = [c for c in base if c.url in fav_set]
+        elif qf == "4k":
+            base = [c for c in base if "4K" in c.name.upper() or "UHD" in c.name.upper()]
+        elif qf == "fhd":
+            base = [c for c in base if "FHD" in c.name.upper() or "1080" in c.name.upper()]
+
+        # Apply sorting
+        sort_mode = getattr(self, "_grid_sort_mode", "default")
+        if sort_mode == "az":
+            base = sorted(base, key=lambda c: c.name.lower())
+        elif sort_mode == "za":
+            base = sorted(base, key=lambda c: c.name.lower(), reverse=True)
+        elif sort_mode == "4k":
+            def _score(c: Channel) -> int:
+                nm = c.name.upper()
+                if "4K" in nm or "UHD" in nm:
+                    return 0
+                if "FHD" in nm or "1080" in nm:
+                    return 1
+                if "HD" in nm or "720" in nm:
+                    return 2
+                return 3
+            base = sorted(base, key=lambda c: (_score(c), c.name.lower()))
+
+        return base
+
+    def _on_sort_changed(self, idx: int) -> None:
+        sender = self.sender()
+        if isinstance(sender, QComboBox):
+            self._grid_sort_mode = sender.currentData() or "default"
+            self._refresh_grid()
+
+    def _on_filter_chip_clicked(self, filter_val: str) -> None:
+        self._grid_quality_filter = filter_val
+        if hasattr(self, "_chip_buttons"):
+            for key_list in self._chip_buttons.values():
+                for btn, val in key_list:
+                    btn.setChecked(val == filter_val)
+        self._refresh_grid()
+
+    def _set_sleep_timer(self, minutes: int) -> None:
+        self._sleep_timer_minutes = minutes
+        if minutes <= 0:
+            self._sleep_seconds_remaining = 0
+            self._sleep_countdown_timer.stop()
+            if hasattr(self, "sleep_badge"):
+                self.sleep_badge.hide()
+            self._flash_status("Sleep timer disabled", 2000)
+        else:
+            self._sleep_seconds_remaining = minutes * 60
+            self._sleep_countdown_timer.start()
+            self._update_sleep_badge()
+            self._flash_status(f"Sleep timer: {minutes} minutes", 2000)
+
+    def _on_sleep_tick(self) -> None:
+        if self._sleep_seconds_remaining <= 0:
+            self._sleep_countdown_timer.stop()
+            self._sleep_timer_minutes = 0
+            if hasattr(self, "sleep_badge"):
+                self.sleep_badge.hide()
+            self._flash_status("Sleep timer reached: stopping playback", 3000)
+            self.player.stop()
+            return
+        self._sleep_seconds_remaining -= 1
+        self._update_sleep_badge()
+
+    def _update_sleep_badge(self) -> None:
+        if not hasattr(self, "sleep_badge"):
+            return
+        if self._sleep_seconds_remaining <= 0:
+            self.sleep_badge.hide()
+            return
+        m = self._sleep_seconds_remaining // 60
+        s = self._sleep_seconds_remaining % 60
+        txt = f"⏱ {m}m" if m > 0 else f"⏱ {s}s"
+        self.sleep_badge.setText(txt)
+        self.sleep_badge.setToolTip(f"Sleep Timer active: {m}m {s}s remaining. Click to change.")
+        self.sleep_badge.show()
+
+    def _open_quick_zapper(self) -> None:
+        channels = self._visible_channels() if hasattr(self, "_visible_channels") else self.channels
+        if not channels:
+            channels = self.channels
+        dlg = _QuickZapperDialog(channels, self._current_channel, self)
+        if dlg.exec() == QDialog.Accepted and dlg.selected_channel:
+            self.play_channel(dlg.selected_channel)
+
+    def _show_stats_dialog(self) -> None:
+        dlg = _StreamStatsDialog(self.player, self._current_channel, self)
+        dlg.exec()
+
+    def _show_window_speed_menu(self) -> None:
+        menu = QMenu(self)
+        speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        cur_spd = self.player.speed
+        for s in speeds:
+            act = menu.addAction(f"{s}x")
+            act.setCheckable(True)
+            act.setChecked(abs(cur_spd - s) < 0.05)
+            act.triggered.connect(partial(self._set_playback_speed, s))
+        pt = self.speed_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6))
+        menu.exec(pt)
+
+    def _set_playback_speed(self, speed: float) -> None:
+        self.player.set_speed(speed)
+        self.speed_btn.setToolTip(f"Playback Speed ({speed}x)")
+        self._flash_status(f"Playback Speed: {speed}x", 2000)
+
+    def _show_window_sleep_menu(self) -> None:
+        menu = QMenu(self)
+        options = [
+            ("Off (Disabled)", 0),
+            ("15 Minutes", 15),
+            ("30 Minutes", 30),
+            ("45 Minutes", 45),
+            ("60 Minutes (1 Hour)", 60),
+            ("90 Minutes (1.5 Hours)", 90),
+            ("120 Minutes (2 Hours)", 120),
+        ]
+        for label, mins in options:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self._sleep_timer_minutes == mins)
+            act.triggered.connect(partial(self._set_sleep_timer, mins))
+        anchor = getattr(self, "sleep_badge", None) if hasattr(self, "sleep_badge") and self.sleep_badge.isVisible() else getattr(self, "sleep_btn", None)
+        if anchor:
+            pt = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+            menu.exec(pt)
+        else:
+            menu.exec(QCursor.pos())
 
     def _refresh_grid(self) -> None:
-        if self._current_page not in ("live", "movie", "series", "favorites"):
+        if self._current_page not in ("live", "movie", "series", "favorites", "search"):
             return
         key = self._current_page
         visible = self._visible_channels()
         self._context_lists[key] = visible
         query = self.search.text().strip()
-        if key == "favorites" and not visible and not query:
+        if key == "search" and not visible and query:
+            empty = dict(
+                empty_title=f"No results for '{query}'",
+                empty_sub="Try a different search term.",
+                cta_text="Clear search",
+                cta_slot=self.search.clear)
+        elif key == "favorites" and not visible and not query:
             empty = dict(
                 empty_title="No favorites yet",
                 empty_sub="Tap the star on any channel to pin it here.",

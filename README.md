@@ -13,7 +13,7 @@ Features:
 - ⭐ **Favorites** persisted to JSON, toggle with the star on any card
 - 🕘 **Recent history** with double-click replay
 - 🔊 Volume slider, mute, pause/resume, stop, fullscreen video
-- 🌙 Dark glassy theme with `#00d4ff` accent, async logo loading
+- 🌙 Dark glassy theme with a violet `#8b5cf6` accent, async logo loading
 
 ## ⬇️ Download (Windows)
 
@@ -100,7 +100,7 @@ iptv-player/
 │   │                       # QThread, QAudioSink audio, frame_ready(QImage) video
 │   └── favorites.py      # JSON favorites store
 └── ui/
-    ├── theme.py          # dark QSS theme, accent #00d4ff
+    ├── theme.py          # dark QSS theme, accent #8b5cf6
     ├── main_window.py    # QMainWindow: sidebar, grids, EPG page, player bar
     ├── widgets.py        # ChannelCard, ChannelGrid, async LogoLabel, EPG timeline
     └── dialogs.py        # Add-playlist + Settings dialogs

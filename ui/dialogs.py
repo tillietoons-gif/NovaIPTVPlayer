@@ -395,6 +395,10 @@ class ShortcutsDialog(QDialog):
         shortcuts = [
             ("Space", "Play / Pause stream"),
             ("F", "Toggle Fullscreen mode"),
+            ("Z / Enter", "Quick Channel Zapper overlay"),
+            ("I", "Stream Diagnostics HUD (Stats for Nerds)"),
+            ("T", "Sleep Timer selector"),
+            ("0–9", "Direct channel number tuning"),
             ("P", "Picture-in-Picture (PiP) floating player"),
             ("A", "Cycle Aspect Ratio (Auto / 16:9 / 4:3 / Fill)"),
             ("C / S", "Audio & Subtitle track selector"),
@@ -406,8 +410,6 @@ class ShortcutsDialog(QDialog):
             ("[", "Toggle sidebar collapse / icon rail"),
             ("Esc", "Exit Fullscreen / Close drawer / Cancel"),
             ("? / F1", "Show this shortcuts help dialog"),
-
-
         ]
 
         for row, (key_label, desc) in enumerate(shortcuts):

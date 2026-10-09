@@ -763,6 +763,107 @@ QFrame#emptyWrap {{
     border-radius: 14px;
 }}
 
+/* ================= advanced player overlays ================= */
+QFrame#zapperOverlay {{
+    background: rgba(10, 14, 24, 0.96);
+    border: 1px solid rgba(139, 92, 246, 0.55);
+    border-radius: 16px;
+}}
+QListWidget#zapperList {{
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 4px;
+}}
+QListWidget#zapperList::item {{
+    background: rgba(21, 27, 40, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    color: {c["text"]};
+}}
+QListWidget#zapperList::item:hover {{
+    background: rgba(32, 41, 61, 0.95);
+    border: 1px solid rgba(139, 92, 246, 0.5);
+}}
+QListWidget#zapperList::item:selected {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(139, 92, 246, 0.35), stop:1 rgba(109, 40, 217, 0.45));
+    border: 1.5px solid {c["accent"]};
+}}
+
+QFrame#statsHud {{
+    background: rgba(9, 12, 19, 0.93);
+    border: 1px solid rgba(6, 182, 212, 0.5);
+    border-radius: 14px;
+}}
+QLabel#statsTitle {{
+    color: {c["cyan"]};
+    font-size: 11pt;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+}}
+QLabel#statsKey {{
+    color: {c["muted"]};
+    font-size: 9pt;
+    font-weight: 600;
+}}
+QLabel#statsVal {{
+    color: #ffffff;
+    font-size: 9pt;
+    font-weight: 700;
+    font-family: monospace;
+}}
+
+QFrame#volumeToast {{
+    background: rgba(15, 19, 29, 0.94);
+    border: 1.5px solid {c["accent"]};
+    border-radius: 20px;
+    padding: 8px 18px;
+}}
+QLabel#channelNumberOsd {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 rgba(139, 92, 246, 0.95), stop:1 rgba(109, 40, 217, 0.95));
+    color: white;
+    font-size: 16pt;
+    font-weight: 800;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-radius: 12px;
+    padding: 6px 18px;
+    letter-spacing: 1px;
+}}
+QLabel#sleepTimerBadge {{
+    background: rgba(245, 158, 11, 0.18);
+    border: 1px solid rgba(245, 158, 11, 0.5);
+    border-radius: 12px;
+    color: #fbbf24;
+    font-weight: 700;
+    font-size: 8.5pt;
+    padding: 3px 10px;
+}}
+
+QPushButton#filterChip {{
+    background: rgba(255, 255, 255, 0.04);
+    color: {c["muted"]};
+    border: 1px solid {c["border"]};
+    border-radius: 14px;
+    padding: 5px 14px;
+    font-size: 9pt;
+    font-weight: 600;
+}}
+QPushButton#filterChip:hover {{
+    background: rgba(255, 255, 255, 0.08);
+    color: {c["text"]};
+    border-color: rgba(139, 92, 246, 0.4);
+}}
+QPushButton#filterChip:checked {{
+    background: {GRADIENT};
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    font-weight: 700;
+}}
+
 /* ================= states ================= */
 QPushButton#primaryBtn:pressed {{
     background: {c["accent2"]};

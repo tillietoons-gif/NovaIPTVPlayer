@@ -158,16 +158,20 @@ class LoginScreen(QWidget):
         form = QFormLayout()
         form.setSpacing(8)
         self.x_server = QLineEdit()
+        self.x_server.setAccessibleName("Server URL")
         self.x_server.setPlaceholderText("https://provider.tv:8080")
         form.addRow("Server URL:", self.x_server)
         self.x_user = QLineEdit()
+        self.x_user.setAccessibleName("Username")
         self.x_user.setPlaceholderText("Username")
         form.addRow("Username:", self.x_user)
         self.x_pass = QLineEdit()
+        self.x_pass.setAccessibleName("Password")
         self.x_pass.setEchoMode(QLineEdit.Password)
         self.x_pass.setPlaceholderText("Password")
         form.addRow("Password:", self.x_pass)
         self.x_name = QLineEdit("My Provider")
+        self.x_name.setAccessibleName("Profile name")
         self.x_name.setPlaceholderText("Profile name")
         form.addRow("Profile name:", self.x_name)
         lay.addLayout(form)
@@ -192,12 +196,15 @@ class LoginScreen(QWidget):
         form = QFormLayout()
         form.setSpacing(8)
         self.m_url = QLineEdit()
+        self.m_url.setAccessibleName("Playlist URL")
         self.m_url.setPlaceholderText("https://example.com/playlist.m3u8")
         form.addRow("Playlist URL:", self.m_url)
         file_row = QHBoxLayout()
         self.m_file = QLineEdit()
+        self.m_file.setAccessibleName("Playlist file")
         self.m_file.setPlaceholderText("…or pick a local file")
         browse = QPushButton("Browse…")
+        browse.setAccessibleName("Browse for playlist file")
         browse.setObjectName("outlineBtn")
         browse.setCursor(Qt.PointingHandCursor)
         browse.clicked.connect(self._browse_m3u)
@@ -205,9 +212,11 @@ class LoginScreen(QWidget):
         file_row.addWidget(browse)
         form.addRow("File:", file_row)
         self.m_name = QLineEdit("My Playlist")
+        self.m_name.setAccessibleName("Profile name")
         self.m_name.setPlaceholderText("Profile name")
         form.addRow("Profile name:", self.m_name)
         self.m_epg = QLineEdit()
+        self.m_epg.setAccessibleName("XMLTV guide URL")
         self.m_epg.setPlaceholderText("https://example.com/epg.xml (optional)")
         form.addRow("XMLTV guide:", self.m_epg)
         lay.addLayout(form)
@@ -251,8 +260,11 @@ class LoginScreen(QWidget):
         username = self.x_user.text().strip()
         password = self.x_pass.text()
         name = self.x_name.text().strip() or "My Provider"
-        if not server or not username:
-            self._fail(self.x_error, "Enter the server URL and username.")
+        if not server or not username or not password:
+            self._fail(
+                self.x_error,
+                "Enter the server URL, username, and password from your provider.",
+            )
             return
         try:
             server_n = normalize_server(server)

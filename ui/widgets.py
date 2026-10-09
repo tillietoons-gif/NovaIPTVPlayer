@@ -21,7 +21,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QGridLayout, QScrollArea, QWidget, QLineEdit, QSizePolicy,
-    QProgressBar,
+    QProgressBar, QListWidget, QListWidgetItem, QComboBox,
 )
 
 from app.models import Channel, EPGProgram
@@ -315,6 +315,55 @@ def make_icon(name: str, size: int = 20,
         line(0.24, 0.32, 0.76, 0.32)
         line(0.24, 0.50, 0.76, 0.50)
         line(0.24, 0.68, 0.76, 0.68)
+    elif name in ("info", "diagnostics"):
+        p.drawEllipse(QRectF(s * 0.18, s * 0.18, s * 0.64, s * 0.64))
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QRectF(s * 0.46, s * 0.29, s * 0.08, s * 0.08))
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        line(0.50, 0.43, 0.50, 0.69)
+        line(0.42, 0.43, 0.50, 0.43)
+        line(0.38, 0.69, 0.62, 0.69)
+    elif name in ("zap", "bolt", "lightning"):
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawPolygon([
+            QPointF(s * 0.54, s * 0.16),
+            QPointF(s * 0.28, s * 0.52),
+            QPointF(s * 0.48, s * 0.52),
+            QPointF(s * 0.44, s * 0.84),
+            QPointF(s * 0.72, s * 0.46),
+            QPointF(s * 0.52, s * 0.46),
+        ])
+    elif name in ("timer", "sleep", "clock"):
+        p.drawEllipse(QRectF(s * 0.20, s * 0.22, s * 0.60, s * 0.60))
+        line(0.42, 0.14, 0.58, 0.14)
+        line(0.50, 0.14, 0.50, 0.22)
+        line(0.50, 0.52, 0.50, 0.34)
+        line(0.50, 0.52, 0.64, 0.52)
+    elif name == "speed":
+        p.drawArc(QRectF(s * 0.18, s * 0.20, s * 0.64, s * 0.64), -30 * 16, 240 * 16)
+        line(0.50, 0.52, 0.66, 0.36)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QRectF(s * 0.44, s * 0.46, s * 0.12, s * 0.12))
+    elif name == "sort":
+        line(0.24, 0.30, 0.56, 0.30)
+        line(0.24, 0.50, 0.48, 0.50)
+        line(0.24, 0.70, 0.40, 0.70)
+        line(0.72, 0.26, 0.72, 0.74)
+        p.drawPolyline([QPointF(s * 0.62, s * 0.62), QPointF(s * 0.72, s * 0.74), QPointF(s * 0.82, s * 0.62)])
+    elif name == "filter":
+        p.drawPolyline([
+            QPointF(s * 0.22, s * 0.24),
+            QPointF(s * 0.78, s * 0.24),
+            QPointF(s * 0.56, s * 0.54),
+            QPointF(s * 0.56, s * 0.78),
+            QPointF(s * 0.44, s * 0.72),
+            QPointF(s * 0.44, s * 0.54),
+            QPointF(s * 0.22, s * 0.24),
+        ])
     p.end()
     return QIcon(pm)
 
@@ -504,6 +553,10 @@ class LogoLabel(QLabel):
         if self._url == url:
             self._apply_image(img)
 
+    def load_url(self, url: str) -> None:
+        """Compatibility alias for callers that name the source explicitly."""
+        self.load(url)
+
 
 # -- small building blocks ----------------------------------------------------
 
@@ -511,6 +564,7 @@ class NavButton(QPushButton):
     def __init__(self, icon_name: str, text: str, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("navBtn")
+        self.setAccessibleName(text)
         self.setCheckable(True)
         self._icon_name = icon_name
         self._label = text
@@ -542,6 +596,7 @@ class IconButton(QPushButton):
     def __init__(self, icon_name: str, size: int = 20, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("iconBtn")
+        self.setAccessibleName(icon_name.replace("_", " ").title())
         self.setIcon(make_icon(icon_name, size))
         self.setCursor(Qt.PointingHandCursor)
         self._dot = QLabel(self)
@@ -558,11 +613,17 @@ class IconButton(QPushButton):
     def set_dot(self, visible: bool) -> None:
         self._dot.setVisible(visible)
 
+    def setToolTip(self, text: str) -> None:  # noqa: N802
+        super().setToolTip(text)
+        if text:
+            self.setAccessibleName(text.split("(")[0].strip())
+
 
 class WinButton(QPushButton):
     def __init__(self, icon_name: str, parent=None, danger: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("winBtn")
+        self.setAccessibleName(icon_name.replace("_", " ").title())
         if danger:
             self.setProperty("danger", "true")
         self.setIcon(make_icon(icon_name, 14, COLORS["muted"]))
@@ -611,7 +672,8 @@ class SearchBar(QLineEdit):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("searchBar")
-        self.setPlaceholderText("Search channels, movies, series...  (Ctrl+K or /)")
+        self.setAccessibleName("Search")
+        self.setPlaceholderText("Search all channels, movies, and series...  (Ctrl+K or /)")
         self.setClearButtonEnabled(True)
 
 
@@ -1011,6 +1073,325 @@ class AudioVisualizer(QWidget):
         p.end()
 
 
+# -- advanced player HUDs and overlays ----------------------------------------
+
+class StreamStatsHud(QFrame):
+    """Floating 'Stats for Nerds' glass HUD displaying real-time stream diagnostics."""
+    closed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("statsHud")
+        self.setFixedWidth(360)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+
+        # Header
+        head = QHBoxLayout()
+        ic = QLabel()
+        ic.setPixmap(make_icon("info", 18, COLORS["cyan"]).pixmap(18, 18))
+        head.addWidget(ic)
+        t = QLabel("Stream Diagnostics")
+        t.setObjectName("statsTitle")
+        head.addWidget(t)
+        head.addStretch(1)
+        close_btn = QPushButton()
+        close_btn.setIcon(make_icon("close", 14, COLORS["muted"]))
+        close_btn.setFixedSize(22, 22)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("background: transparent; border: none;")
+        close_btn.clicked.connect(self.close)
+        head.addWidget(close_btn)
+        self.close_btn = close_btn
+        lay.addLayout(head)
+
+        # Stats Grid
+        self._grid = QGridLayout()
+        self._grid.setSpacing(6)
+        self._rows = {}
+
+        fields = [
+            ("res", "Resolution:"),
+            ("fps", "Frame Rate:"),
+            ("vcodec", "Video Codec:"),
+            ("acodec", "Audio Codec:"),
+            ("audio", "Sample / Ch:"),
+            ("bitrate", "Est. Bitrate:"),
+            ("frames", "Frame Sync:"),
+            ("fmt", "Container:"),
+            ("speed", "Speed:"),
+        ]
+        for idx, (key, label) in enumerate(fields):
+            k_lbl = QLabel(label)
+            k_lbl.setObjectName("statsKey")
+            v_lbl = QLabel("—")
+            v_lbl.setObjectName("statsVal")
+            self._grid.addWidget(k_lbl, idx, 0)
+            self._grid.addWidget(v_lbl, idx, 1)
+            self._rows[key] = v_lbl
+
+        self._lbls = self._rows
+        lay.addLayout(self._grid)
+
+    def update_stats(self, info: dict) -> None:
+        if not info:
+            return
+        w = info.get("width", 0)
+        h = info.get("height", 0)
+        self._rows["res"].setText(f"{w} × {h}" if w and h else "Unknown")
+        fps = info.get("fps", 0)
+        self._rows["fps"].setText(f"{fps:.1f} fps" if isinstance(fps, float) and fps else (f"{fps} fps" if fps else "Variable"))
+        vcodec = info.get("video_codec", "") or ""
+        self._rows["vcodec"].setText(vcodec.upper() if vcodec else "Unknown")
+        acodec = info.get("audio_codec", "") or ""
+        self._rows["acodec"].setText(acodec.upper() if acodec else "None")
+        sr = info.get("audio_sample_rate", 0)
+        ch = info.get("audio_channels", 0)
+        ch_str = "Stereo" if ch == 2 else (f"{ch} Ch" if ch else "—")
+        self._rows["audio"].setText(f"{sr} Hz • {ch_str}" if sr else "—")
+        v_br = info.get("bitrate", 0) or info.get("video_bitrate", 0) or info.get("total_bitrate", 0)
+        if v_br and v_br > 0:
+            kbps = v_br // 1000
+            self._rows["bitrate"].setText(f"~{kbps} kbps" if kbps < 1000 else f"~{kbps/1000:.2f} Mbps")
+        else:
+            self._rows["bitrate"].setText("Adaptive stream")
+        rendered = info.get("frames_rendered", 0)
+        dropped = info.get("frames_dropped", 0)
+        if rendered or dropped:
+            sync_pct = (rendered / max(1, rendered + dropped)) * 100
+            self._rows["frames"].setText(f"{rendered} shown / {dropped} drop ({sync_pct:.1f}%)")
+        else:
+            self._rows["frames"].setText("100% sync")
+        fmt = info.get("format", "") or ""
+        self._rows["fmt"].setText(fmt.upper() if fmt else "HLS / Stream")
+        spd = info.get("playback_speed", info.get("speed", 1.0))
+        self._rows["speed"].setText(f"{spd:.2f}x" if spd != 1.0 else "1.0x Normal")
+
+    def close(self) -> bool:
+        self.closed.emit()
+        return super().close()
+
+
+class VolumeToast(QFrame):
+    """Floating HUD on-screen volume gauge with animated level indicator."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("volumeToast")
+        self.setFixedHeight(44)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 6, 14, 6)
+        lay.setSpacing(10)
+
+        self.icon_lbl = QLabel()
+        self.icon_lbl.setPixmap(make_icon("volume", 18, COLORS["text"]).pixmap(18, 18))
+        lay.addWidget(self.icon_lbl)
+
+        self.text_lbl = QLabel("80%")
+        self.text_lbl.setStyleSheet("color: white; font-weight: 700; font-size: 10pt; min-width: 44px;")
+        lay.addWidget(self.text_lbl)
+
+        self.bar = QProgressBar()
+        self.bar.setObjectName("miniProgress")
+        self.bar.setRange(0, 125)
+        self.bar.setValue(80)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedWidth(90)
+        self.bar.setFixedHeight(6)
+        lay.addWidget(self.bar)
+
+        self.hide()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(1600)
+        self._timer.timeout.connect(self.hide)
+
+    def show_volume(self, volume: int, muted: bool = False) -> None:
+        vol = max(0, min(125, int(volume)))
+        if muted or vol == 0:
+            self.icon_lbl.setPixmap(make_icon("mute", 18, COLORS["red"]).pixmap(18, 18))
+            self.text_lbl.setText("Muted")
+            self.bar.setValue(0)
+        else:
+            icon_col = COLORS["accent"] if vol <= 100 else COLORS["gold"]
+            self.icon_lbl.setPixmap(make_icon("volume", 18, icon_col).pixmap(18, 18))
+            text = f"{vol}%" if vol <= 100 else f"{vol}% (Boost)"
+            self.text_lbl.setText(text)
+            self.bar.setValue(vol)
+
+        if self.parentWidget() is not None:
+            pw = self.parentWidget()
+            self.adjustSize()
+            x = (pw.width() - self.width()) // 2
+            y = 70
+            self.move(x, y)
+        self.show()
+        self.raise_()
+        self._timer.start()
+
+
+class ChannelNumberOsd(QLabel):
+    """Direct channel number dialing OSD badge."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("channelNumberOsd")
+        self.setAlignment(Qt.AlignCenter)
+        self.hide()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(1800)
+        self._timer.timeout.connect(self.hide)
+
+    def show_number(self, digits: str) -> None:
+        self.setText(f"CH {digits}")
+        self.adjustSize()
+        if self.parentWidget():
+            self.move(self.parentWidget().width() - self.width() - 32, 28)
+        self.show()
+        self.raise_()
+        self._timer.start()
+
+    show_digits = show_number
+
+
+class QuickZapperOverlay(QFrame):
+    """Slide-over channel zapper OSD for instantaneous channel switching during playback."""
+    channel_selected = Signal(object)  # Channel
+    fav_toggled = Signal(object, bool) # Channel, new_state
+    closed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("zapperOverlay")
+        self.setFixedWidth(360)
+        self._all_channels: list[Channel] = []
+        self._filtered_channels: list[Channel] = []
+        self._favorites: set[str] = set()
+        self._epg_lookup = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+
+        # Header
+        head = QHBoxLayout()
+        ic = QLabel()
+        ic.setPixmap(make_icon("zap", 20, COLORS["accent"]).pixmap(20, 20))
+        head.addWidget(ic)
+        title = QLabel("Channel Zapper")
+        title.setObjectName("statsTitle")
+        head.addWidget(title)
+        self.count_lbl = QLabel("")
+        self.count_lbl.setStyleSheet(f"color: {COLORS['muted']}; font-size: 8.5pt;")
+        head.addWidget(self.count_lbl)
+        head.addStretch(1)
+
+        close_b = QPushButton()
+        close_b.setIcon(make_icon("close", 14, COLORS["muted"]))
+        close_b.setFixedSize(24, 24)
+        close_b.setCursor(Qt.PointingHandCursor)
+        close_b.setStyleSheet("background: transparent; border: none;")
+        close_b.clicked.connect(self.hide_zapper)
+        head.addWidget(close_b)
+        lay.addLayout(head)
+
+        # Search Bar
+        self.search = QLineEdit()
+        self.search.setObjectName("searchBar")
+        self.search.setPlaceholderText("Filter channels... (type to search)")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._apply_filter)
+        self.search_input = self.search
+        lay.addWidget(self.search)
+
+        # Category Box
+        self.cat_box = QComboBox()
+        self.cat_box.addItem("All Categories")
+        self.cat_box.currentIndexChanged.connect(self._apply_filter)
+        lay.addWidget(self.cat_box)
+
+        # Channel List
+        self.list = QListWidget()
+        self.list.setObjectName("zapperList")
+        self.list.itemActivated.connect(self._on_item_activated)
+        self.list.itemClicked.connect(self._on_item_activated)
+        self.list_widget = self.list
+        lay.addWidget(self.list, 1)
+
+        self.hide()
+
+    def set_channels(self, channels: list[Channel], favorites: set[str] | None = None, epg_lookup=None, current: Channel | None = None) -> None:
+        self._all_channels = list(channels)
+        self._favorites = set(favorites) if favorites else set()
+        self._epg_lookup = epg_lookup
+
+        # Populate categories
+        self.cat_box.blockSignals(True)
+        self.cat_box.clear()
+        self.cat_box.addItem("All Categories")
+        groups = sorted({c.display_group for c in channels if c.display_group}, key=str.lower)
+        for g in groups:
+            self.cat_box.addItem(g)
+        self.cat_box.blockSignals(False)
+        self._apply_filter()
+
+        if current is not None:
+            for i in range(self.list.count()):
+                item = self.list.item(i)
+                if item and item.data(Qt.UserRole) == current:
+                    self.list.setCurrentItem(item)
+                    self.list.scrollToItem(item)
+                    break
+
+    def _apply_filter(self) -> None:
+        q = self.search.text().strip().lower()
+        cat = self.cat_box.currentText()
+        filtered = []
+        for c in self._all_channels:
+            if cat != "All Categories" and c.display_group != cat:
+                continue
+            if q and q not in c.name.lower():
+                continue
+            filtered.append(c)
+        self._filtered_channels = filtered
+        self.count_lbl.setText(f"({len(filtered)})")
+
+        self.list.clear()
+        for idx, ch in enumerate(filtered, start=1):
+            item = QListWidgetItem()
+            epg_info = ""
+            if self._epg_lookup:
+                try:
+                    epg_info = self._epg_lookup(ch) or ""
+                except Exception:
+                    epg_info = ""
+            text = f"#{idx:02d}  {ch.name}"
+            if epg_info:
+                text += f"\n     ▶ {epg_info}"
+            item.setText(text)
+            item.setData(Qt.UserRole, ch)
+            self.list.addItem(item)
+
+    def _on_item_activated(self, item: QListWidgetItem) -> None:
+        ch = item.data(Qt.UserRole)
+        if ch:
+            self.channel_selected.emit(ch)
+
+    def show_zapper(self) -> None:
+        if self.parentWidget():
+            self.setGeometry(0, 0, self.width(), self.parentWidget().height())
+        self.show()
+        self.raise_()
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def hide_zapper(self) -> None:
+        self.hide()
+        self.closed.emit()
+
+
 # -- channel card / grid -----------------------------------------------------
 
 
@@ -1066,6 +1447,7 @@ class ChannelCard(QFrame):
         super().__init__(parent)
         self.channel = channel
         self.setObjectName("channelCard")
+        self.setAccessibleName(channel.name)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedWidth(172)
 
@@ -1097,6 +1479,7 @@ class ChannelCard(QFrame):
         self.fav_btn.setIcon(make_icon(
             "star", 18, COLORS["accent"] if is_fav else COLORS["muted"]))
         self.fav_btn.setToolTip("Toggle favorite")
+        self.fav_btn.setAccessibleName(f"Toggle favorite for {channel.name}")
         self.fav_btn.setCursor(Qt.PointingHandCursor)
         self.fav_btn.clicked.connect(self._on_fav)
         bottom.addWidget(self.fav_btn)

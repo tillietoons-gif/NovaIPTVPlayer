@@ -100,6 +100,7 @@ class _DecodeWorker(QThread):
     ended = Signal()                 # natural end of stream (not user stop)
     tracks_ready = Signal(list, list)  # audio_tracks, subtitle_tracks
     subtitle_ready = Signal(str)        # subtitle text
+    media_info_ready = Signal(dict)     # real-time stream diagnostics
 
     def __init__(self, url: str, volume: int, muted: bool,
                  headers: dict[str, str] | None = None,
@@ -113,6 +114,10 @@ class _DecodeWorker(QThread):
         self._paused = False
         self._pause_cond = threading.Condition()
         self._seek_ms: int | None = None  # pending seek request (polled)
+        self._playback_speed: float = 1.0  # speed multiplier for VOD pacing
+        self._frames_rendered: int = 0
+        self._frames_dropped: int = 0
+        self._media_info: dict = {}
         self._last_shown_pts: float | None = None  # newest presented video pts
         self.error_detail: str = ""  # first failure description, if any
         self.seekable = False        # True once a finite duration is known
@@ -128,6 +133,9 @@ class _DecodeWorker(QThread):
         self._rec_path: str | None = None     # path of the active recording
 
     # -- control (called from the GUI thread) --------------------------------
+    def request_speed(self, speed: float) -> None:
+        self._playback_speed = max(0.25, min(3.0, float(speed)))
+
     def request_audio_track(self, index: int) -> None:
         self._target_audio_index = int(index)
 
@@ -233,6 +241,47 @@ class _DecodeWorker(QThread):
         except Exception:
             duration_ms = 0  # live streams report no duration
         self.seekable = duration_ms > 0
+
+        # Collect stream metadata for real-time diagnostics HUD
+        vcodec, width, height, fps, v_bitrate = "", 0, 0, 0.0, 0
+        if vstream is not None:
+            vcodec = getattr(vstream.codec_context, "name", "") or getattr(vstream, "name", "")
+            width = getattr(vstream, "width", 0) or 0
+            height = getattr(vstream, "height", 0) or 0
+            v_bitrate = getattr(vstream, "bit_rate", 0) or 0
+            rate = getattr(vstream, "average_rate", None) or getattr(vstream, "guessed_rate", None)
+            if rate is not None:
+                try:
+                    fps = float(rate)
+                except Exception:
+                    fps = 0.0
+
+        acodec, a_sample_rate, a_channels, a_bitrate = "", 0, 0, 0
+        if astream is not None:
+            acodec = getattr(astream.codec_context, "name", "") or getattr(astream, "name", "")
+            a_sample_rate = getattr(astream, "rate", 0) or 0
+            a_channels = getattr(astream, "channels", 0) or 0
+            a_bitrate = getattr(astream, "bit_rate", 0) or 0
+
+        fmt_name = getattr(container.format, "name", "") or ""
+        total_bitrate = getattr(container, "bit_rate", 0) or 0
+
+        self._media_info = {
+            "format": fmt_name,
+            "video_codec": vcodec,
+            "width": width,
+            "height": height,
+            "fps": round(fps, 2) if fps else 0.0,
+            "video_bitrate": v_bitrate,
+            "audio_codec": acodec,
+            "audio_sample_rate": a_sample_rate,
+            "audio_channels": a_channels,
+            "audio_bitrate": a_bitrate,
+            "total_bitrate": total_bitrate,
+            "duration_ms": duration_ms,
+            "url": self.url,
+        }
+        self.media_info_ready.emit(dict(self._media_info))
 
         # Audio output chain (created in this thread for correct affinity).
         sink: QAudioSink | None = None
@@ -483,7 +532,8 @@ class _DecodeWorker(QThread):
 
     def _pace(self, pts: float, t0: float, pts_origin: float) -> None:
         """Sleep until a frame's pts is due (<=50 ms slices)."""
-        due = t0 + (pts - pts_origin)
+        speed = self._playback_speed if self._playback_speed > 0 else 1.0
+        due = t0 + (pts - pts_origin) / speed
         while True:
             if self._stop_event.is_set() or self._paused or self._seek_ms is not None:
                 return
@@ -504,6 +554,7 @@ class _DecodeWorker(QThread):
         """
         if (self._last_shown_pts is not None
                 and pts < self._last_shown_pts - _LATE_DROP_S):
+            self._frames_dropped += 1
             return False  # stale: a newer picture is already on screen
         self._pace(pts, t0, pts_origin)
         if self._stop_event.is_set() or self._seek_ms is not None:
@@ -521,6 +572,7 @@ class _DecodeWorker(QThread):
             return False
         self.frame_ready.emit(img)
         self._last_shown_pts = pts
+        self._frames_rendered += 1
         return True
 
     def _write_audio(self, frame, resampler, device) -> None:
@@ -560,6 +612,7 @@ class Player(QObject):
     recording_stopped = Signal(str)  # final path
     recording_error = Signal(str)    # human-readable failure reason
     playback_finished = Signal()     # natural end of stream (not user stop)
+    media_info_ready = Signal(dict)  # real-time stream diagnostics
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -573,6 +626,8 @@ class Player(QObject):
         self._last_error = ""         # human-readable reason for last failure
         self._last_pos_s = 0.0        # last reported position, seconds
         self._last_dur_s: float | None = None  # last reported duration, s
+        self._playback_speed: float = 1.0
+        self._last_media_info: dict = {}
         self._audio_tracks: list[dict] = []
         self._subtitle_tracks: list[dict] = []
         self._current_audio_track: int = 0
@@ -613,12 +668,15 @@ class Player(QObject):
         self._last_error = ""
         self._last_pos_s = 0.0
         self._last_dur_s = None
+        self._last_media_info = {}
         self._audio_tracks = []
         self._subtitle_tracks = []
         self._current_audio_track = 0
         self._current_subtitle_track = -1
         self._worker = _DecodeWorker(
             url, self._volume, self._muted, dict(headers or {}))
+        if self._playback_speed != 1.0:
+            self._worker.request_speed(self._playback_speed)
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
         self._worker_connections = [
             self._worker.frame_ready.connect(self.frame_ready.emit),
@@ -628,12 +686,17 @@ class Player(QObject):
             self._worker.position_changed.connect(self._track_position),
             self._worker.tracks_ready.connect(self._on_tracks_ready),
             self._worker.subtitle_ready.connect(self.subtitle_ready.emit),
+            self._worker.media_info_ready.connect(self._on_media_info_ready),
             self._worker.recording_started.connect(self.recording_started.emit),
             self._worker.recording_stopped.connect(self.recording_stopped.emit),
             self._worker.recording_error.connect(self.recording_error.emit),
             self._worker.ended.connect(self.playback_finished.emit),
         ]
         self._worker.start()
+
+    def _on_media_info_ready(self, info: dict) -> None:
+        self._last_media_info = dict(info)
+        self.media_info_ready.emit(info)
 
     def _on_tracks_ready(self, audio: list, subs: list) -> None:
         self._audio_tracks = audio
@@ -781,3 +844,38 @@ class Player(QObject):
     @property
     def current_subtitle_track(self) -> int:
         return self._current_subtitle_track
+
+    # -- media diagnostics & speed --------------------------------------------------
+    def media_info(self) -> dict:
+        """Return real-time stream metadata and decoder health."""
+        defaults = {
+            "video_codec": "",
+            "audio_codec": "",
+            "width": 0,
+            "height": 0,
+            "fps": 0.0,
+            "bitrate": 0,
+            "format": "",
+            "frames_rendered": 0,
+            "frames_dropped": 0,
+            "playback_speed": self._playback_speed,
+        }
+        res = dict(defaults)
+        res.update(self._last_media_info)
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            res["frames_rendered"] = worker._frames_rendered
+            res["frames_dropped"] = worker._frames_dropped
+            res["playback_speed"] = worker._playback_speed
+        return res
+
+    def set_speed(self, speed: float) -> None:
+        """Set playback rate (e.g. 0.75, 1.0, 1.25, 1.5, 2.0)."""
+        self._playback_speed = max(0.25, min(4.0, float(speed)))
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker.request_speed(self._playback_speed)
+
+    @property
+    def speed(self) -> float:
+        return self._playback_speed
