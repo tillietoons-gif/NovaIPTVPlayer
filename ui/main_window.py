@@ -3,13 +3,16 @@ right Now-Playing panel, status bar)."""
 
 from __future__ import annotations
 
+import re
+import time
 from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import (
     Qt, QThread, Signal, QPoint, QTimer, QPropertyAnimation,
-    QAbstractAnimation, QUrl,
+    QAbstractAnimation, QUrl, QStandardPaths,
 )
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -29,12 +32,14 @@ from app.models import (
     xtream_episodes_to_channels,
 )
 from app.player import Player
+from app.parental import ParentalControls
 from app.playlist import (
     load_playlist, categories, filter_channels,
 )
 from app.profiles import ProfileStore, ProviderProfile, migrate_legacy
+from app.resume import ResumeStore
 from app.xtream import XtreamClient, XtreamError
-from ui.dialogs import AddPlaylistDialog, SettingsDialog
+from ui.dialogs import AddPlaylistDialog, SettingsDialog, PinDialog
 from ui.login import LoginScreen
 from ui.theme import COLORS, animations_enabled
 from ui.widgets import (
@@ -46,6 +51,23 @@ from ui.widgets import (
 
 
 # -- background loaders (Qt threads, not asyncio: simpler on Windows) --------
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_filename(name: str, max_len: int = 60) -> str:
+    """Make a channel name safe for use as a file name."""
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", (name or "").strip())
+    cleaned = cleaned.strip().strip(".")
+    return cleaned[:max_len] or "recording"
+
+
+def _fmt_time(seconds: float) -> str:
+    """Format seconds as m:ss or h:mm:ss."""
+    s = max(0, int(seconds))
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 class _PlaylistLoader(QThread):
     finished_ok = Signal(list)
@@ -496,6 +518,8 @@ class MainWindow(QMainWindow):
         self.favorites = FavoritesStore()
         self.epg = EPGManager()
         self.player = Player(self)
+        self.parental = ParentalControls()
+        self.resume = ResumeStore()
 
         # provider profiles (Smarters-Pro style); migrate legacy settings once
         migrate_legacy(self.config)
@@ -522,9 +546,22 @@ class MainWindow(QMainWindow):
         self._loader: _PlaylistLoader | None = None
         self._epg_loader: _EpgLoader | None = None
         self._muted = False
+        self._player_state = "stopped"
         self._count_labels: dict[str, QLabel] = {}
         self.category_boxes: dict[str, QComboBox] = {}
         self.grids: dict[str, ChannelGrid] = {}
+        # resume playback
+        self._pending_resume_seek: float | None = None
+        self._resume_seek_deadline = 0.0
+        self._resume_timer = QTimer(self)
+        self._resume_timer.setInterval(15000)
+        self._resume_timer.timeout.connect(self._save_resume_point)
+        self._resume_timer.start()
+        # recording
+        self._rec_started_at = 0.0
+        self._rec_timer = QTimer(self)
+        self._rec_timer.setInterval(1000)
+        self._rec_timer.timeout.connect(self._update_rec_elapsed)
 
         self._build_ui()
         self._connect_player()
@@ -867,8 +904,12 @@ class MainWindow(QMainWindow):
         profile = self.profiles.get(profile_id)
         if profile is None:
             return
+        self._save_resume_point()
+        if not self._confirm_stop_recording("switch provider"):
+            return
         self.profiles.set_active(profile_id)
         self._profile = profile
+        self.parental.lock_all()  # session unlocks don't cross providers
         self._clear_content()
         self._refresh_provider_btn()
         self._load_profile(profile)
@@ -887,8 +928,12 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        self._save_resume_point()
+        if not self._confirm_stop_recording("remove the provider"):
+            return
         self.profiles.remove(p.id)
         self._profile = self.profiles.active()
+        self.parental.lock_all()
         self._clear_content()
         self._refresh_provider_btn()
         if self._profile is not None:
@@ -898,6 +943,7 @@ class MainWindow(QMainWindow):
 
     def _clear_content(self) -> None:
         """Unload everything (profile switch / provider removal)."""
+        self._save_resume_point()
         self.player.stop()
         self.channels = []
         self.epg = EPGManager()
@@ -1207,6 +1253,8 @@ class MainWindow(QMainWindow):
 
     def _open_series_detail(self, channel: Channel) -> None:
         """Smarters-style drill-down: series -> seasons -> episodes."""
+        if not self._parental_allows(channel):
+            return
         if self._xtream is None or not channel.series_id:
             self.play_channel(
                 channel, self._context_lists.get("series", [channel]))
@@ -1636,6 +1684,10 @@ class MainWindow(QMainWindow):
         self.np_meta = QLabel("")
         self.np_meta.setObjectName("cardMeta")
         cl.addWidget(self.np_meta)
+        self.rec_label = QLabel("")
+        self.rec_label.setObjectName("recLabel")
+        self.rec_label.setVisible(False)
+        cl.addWidget(self.rec_label)
         lay.addWidget(card)
 
         transport = QHBoxLayout()
@@ -1643,8 +1695,12 @@ class MainWindow(QMainWindow):
         self.prev_btn = self._tbtn("prev", self._play_prev)
         self.pp_btn = self._tbtn("play", self._toggle_pause)
         self.next_btn = self._tbtn("next", self._play_next)
+        self.rec_btn = self._tbtn("rec", self._toggle_record)
+        self.rec_btn.setIcon(make_icon("rec", 14, COLORS["red"]))
+        self.rec_btn.setToolTip("Record")
+        self.rec_btn.setEnabled(False)
         self.fs_btn = self._tbtn("expand", self._toggle_fullscreen)
-        for b in (self.prev_btn, self.pp_btn, self.next_btn):
+        for b in (self.prev_btn, self.pp_btn, self.next_btn, self.rec_btn):
             transport.addWidget(b)
         transport.addStretch(1)
         transport.addWidget(self.fs_btn)
@@ -1717,6 +1773,10 @@ class MainWindow(QMainWindow):
         self.player.state_changed.connect(self._on_player_state)
         self.player.frame_ready.connect(self.thumb_video.set_frame)
         self.player.position_changed.connect(self._on_position)
+        self.player.recording_started.connect(self._on_rec_started)
+        self.player.recording_stopped.connect(self._on_rec_stopped)
+        self.player.recording_error.connect(self._on_rec_error)
+        self.player.playback_finished.connect(self._on_playback_finished)
         self.player.set_mute(self.config.muted)
         self.player.set_volume(self.config.volume)
         self.player.attach(self.thumb_video)
@@ -1784,7 +1844,25 @@ class MainWindow(QMainWindow):
             self._refresh_grid()
 
     def _on_category_changed(self, text: str) -> None:
-        self._current_category = "" if text == "All categories" else text
+        group = "" if text == "All categories" else text
+        if (group and self.parental.has_pin()
+                and self.parental.is_locked(group)
+                and not self.parental.is_unlocked(group)):
+            dlg = PinDialog(self.parental.verify, self,
+                            f'"{group}" is locked.')
+            if dlg.exec() == QDialog.Accepted:
+                self.parental.unlock_group(group)
+                self._refresh_locks()
+            else:
+                box = self.sender()
+                if isinstance(box, QComboBox):
+                    box.blockSignals(True)
+                    box.setCurrentText("All categories")
+                    box.blockSignals(False)
+                self._current_category = ""
+                self._refresh_grid()
+                return
+        self._current_category = group
         self._refresh_grid()
 
     # -- profiles -----------------------------------------------------------
@@ -1905,6 +1983,7 @@ class MainWindow(QMainWindow):
         self._refresh_grid()
         self._refresh_home()
         self._refresh_providers_page()
+        self._refresh_locks()
         self._update_bell()
 
     # -- EPG ------------------------------------------------------------------
@@ -1974,6 +2053,7 @@ class MainWindow(QMainWindow):
             card.clicked.connect(
                 lambda c=ch: self.play_channel(c, self._live_channels()))
             card.fav_toggled.connect(self._on_fav_toggled)
+            card.set_locked(self._is_locked(ch))
             self.home_live_row.addWidget(card)
         self.home_live_row.addStretch(1)
 
@@ -2052,6 +2132,8 @@ class MainWindow(QMainWindow):
         self.play_channel(channel, self._context_lists.get(key, [channel]))
 
     def _open_movie_details(self, channel: Channel) -> None:
+        if not self._parental_allows(channel):
+            return
         client = (self._xtream if self._profile is not None
                   and self._profile.is_xtream() else None)
         dlg = _MovieDetailsDialog(
@@ -2172,6 +2254,16 @@ class MainWindow(QMainWindow):
     # -- playback ---------------------------------------------------------------
     def play_channel(self, channel: Channel,
                      context: list[Channel] | None = None) -> None:
+        # parental gate: locked categories need the PIN first
+        if not self._parental_allows(channel):
+            return
+        # don't clobber an active recording without asking
+        if not self._confirm_stop_recording("switch channel"):
+            return
+        # remember where the outgoing VOD stopped
+        self._save_resume_point()
+        self._pending_resume_seek = None
+        resume_pos = self._resume_offer(channel)
         if context is not None:
             self._play_context = list(context)
             try:
@@ -2190,6 +2282,10 @@ class MainWindow(QMainWindow):
         self.player.play(channel.url, channel.stream_headers)
         self.player.set_volume(self.vol.value())
         self.player.set_mute(self._muted)
+        if resume_pos is not None:
+            # seek once the engine is running; _on_position retries briefly
+            self._pending_resume_seek = resume_pos
+            self._resume_seek_deadline = time.monotonic() + 5.0
 
         self.np_title.setText(channel.name)
         self.np_meta.setText(
@@ -2208,6 +2304,129 @@ class MainWindow(QMainWindow):
         self._update_now_next()
         if self._current_page == "home":
             self._refresh_home()
+
+    # -- parental controls ------------------------------------------------------
+    def _is_locked(self, channel: Channel) -> bool:
+        return (self.parental.has_pin()
+                and self.parental.is_locked(channel.display_group))
+
+    def _parental_allows(self, channel: Channel) -> bool:
+        """True when the channel may play (PIN prompt for locked groups)."""
+        if not self._is_locked(channel):
+            return True
+        if self.parental.is_unlocked(channel.display_group):
+            return True
+        dlg = PinDialog(self.parental.verify, self,
+                        f'"{channel.display_group}" is locked.')
+        if dlg.exec() == QDialog.Accepted:
+            self.parental.unlock_group(channel.display_group)
+            self._refresh_locks()
+            return True
+        return False
+
+    def _refresh_locks(self) -> None:
+        """Refresh lock badges after PIN / lock-list changes."""
+        locked = (self.parental.locked_groups()
+                  if self.parental.has_pin() else set())
+        for grid in self.grids.values():
+            grid.set_locked_groups(locked)
+
+    # -- resume playback ----------------------------------------------------------
+    def _save_resume_point(self) -> None:
+        """Persist the current VOD position (called periodically + on stop)."""
+        ch = self._current_channel
+        if ch is None or ch.kind not in ("movie", "series") or not ch.url:
+            return
+        if self._player_state not in ("playing", "paused"):
+            return
+        pos = self.player.position()
+        if pos > 5:  # ignore trivial positions near the start
+            self.resume.save(ch.url, pos, self.player.duration() or 0.0)
+
+    def _resume_offer(self, channel: Channel) -> float | None:
+        """Offer to resume a partially-watched VOD. Returns position or None."""
+        if channel.kind not in ("movie", "series") or not channel.url:
+            return None
+        entry = self.resume.position_for(channel.url)
+        if entry is None:
+            return None
+        pos, dur = entry
+        if not (dur > 0 and pos > 20 and pos < 0.95 * dur):
+            return None
+        box = QMessageBox(self)
+        box.setWindowTitle("Resume playback")
+        box.setText(f'Resume "{channel.name}" from {_fmt_time(pos)}?')
+        resume_btn = box.addButton("Resume", QMessageBox.AcceptRole)
+        box.addButton("Start over", QMessageBox.RejectRole)
+        box.exec()
+        return pos if box.clickedButton() == resume_btn else None
+
+    # -- recording ------------------------------------------------------------------
+    def _recordings_dir(self) -> Path:
+        try:
+            d = Path.home() / "Videos" / "NovaIPTV"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except OSError:
+            fallback = Path(QStandardPaths.writableLocation(
+                QStandardPaths.AppDataLocation)) / "recordings"
+            fallback.mkdir(parents=True, exist_ok=True)
+            return fallback
+
+    def _toggle_record(self) -> None:
+        if self.player.is_recording:
+            self.player.stop_recording()
+            return
+        ch = self._current_channel
+        if ch is None or self._player_state not in (
+                "playing", "paused", "buffering"):
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = str(self._recordings_dir() / f"{_safe_filename(ch.name)}"
+                   f"_{stamp}.mp4")
+        self.player.start_recording(path)
+
+    def _confirm_stop_recording(self, action: str) -> bool:
+        """Ask before a recording is clobbered. Returns True to proceed."""
+        if not self.player.is_recording:
+            return True
+        answer = QMessageBox.question(
+            self, "Stop recording?",
+            f"A recording is in progress. Stop it and {action}?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self.player.stop_recording()
+            return True
+        return False
+
+    def _on_rec_started(self, path: str) -> None:
+        self.rec_label.setVisible(True)
+        self._rec_started_at = time.monotonic()
+        self._update_rec_elapsed()
+        self._rec_timer.start()
+        self.rec_btn.setToolTip("Stop recording")
+        self._flash_status(f"Recording — {Path(path).name}")
+
+    def _on_rec_stopped(self, path: str) -> None:
+        self._rec_timer.stop()
+        self.rec_label.setVisible(False)
+        self.rec_btn.setToolTip("Record")
+        self._flash_status(f"Recording saved: {path}")
+
+    def _on_rec_error(self, msg: str) -> None:
+        self._rec_timer.stop()
+        self.rec_label.setVisible(False)
+        self.rec_btn.setToolTip("Record")
+        QMessageBox.warning(self, "Recording", msg)
+
+    def _update_rec_elapsed(self) -> None:
+        elapsed = time.monotonic() - self._rec_started_at
+        self.rec_label.setText(f"● REC  {_fmt_time(elapsed)}")
+
+    def _flash_status(self, msg: str, ms: int = 6000) -> None:
+        """Show a transient message in the status bar."""
+        self.status_text.setText(msg)
+        QTimer.singleShot(ms, self._update_status)
 
     def _play_prev(self) -> None:
         if not self._play_context:
@@ -2259,14 +2478,41 @@ class MainWindow(QMainWindow):
     def _on_position(self, pos_ms: int, dur_ms: int) -> None:
         if self._current_channel:
             self._progress[self._current_channel.url] = (pos_ms, dur_ms)
+        # resume-seek: the engine may need a moment before seek() works;
+        # retry on each position report for ~5 s, then play from the start.
+        if self._pending_resume_seek is not None:
+            if time.monotonic() < self._resume_seek_deadline:
+                if self.player.seek(self._pending_resume_seek):
+                    self._pending_resume_seek = None
+            else:
+                self._pending_resume_seek = None
+
+    def _on_playback_finished(self) -> None:
+        """Natural end of a stream: a finished VOD needs no resume point."""
+        ch = self._current_channel
+        if ch is not None and ch.kind in ("movie", "series") and ch.url:
+            self.resume.clear(ch.url)
 
     def _on_player_state(self, state: str) -> None:
+        self._player_state = state
         if state == "playing":
             self.pp_btn.setIcon(make_icon("pause", 18))
         elif state == "paused":
             self.pp_btn.setIcon(make_icon("play", 18))
         elif state in ("stopped", "error"):
             self.pp_btn.setIcon(make_icon("play", 18))
+        self.rec_btn.setEnabled(
+            state in ("playing", "paused", "buffering")
+            and self._current_channel is not None)
+        if state == "stopped" and self._current_channel is not None:
+            # A stop at >=95% means "watched": drop the resume point.
+            ch = self._current_channel
+            if ch.kind in ("movie", "series") and ch.url:
+                entry = self.resume.position_for(ch.url)
+                if entry is not None:
+                    pos, dur = entry
+                    if dur > 0 and pos >= 0.95 * dur:
+                        self.resume.clear(ch.url)
         if state == "error":
             detail = (self.player.last_error or "").strip()
             msg = ("The built-in player could not play this stream.\n"
@@ -2415,11 +2661,16 @@ class MainWindow(QMainWindow):
 
     # -- settings ---------------------------------------------------------------------
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self.config, self)
+        groups = sorted({c.display_group for c in self.channels
+                         if c.display_group})
+        dlg = SettingsDialog(self.config, self,
+                             parental=self.parental, groups=groups)
         if dlg.exec():
             self.vol.setValue(self.config.volume)
             if self.config.muted != self._muted:
                 self._toggle_mute()
+        # PIN removal/change applies immediately, even on Cancel
+        self._refresh_locks()
 
     def _show_details(self, channel: Channel) -> None:
         now, nxt = (self.epg.now_and_next(channel.tvg_id, channel.name)
@@ -2430,6 +2681,10 @@ class MainWindow(QMainWindow):
 
     # -- shutdown -----------------------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802
+        if not self._confirm_stop_recording("exit"):
+            event.ignore()
+            return
+        self._save_resume_point()
         self.config.window_geometry = bytes(self.saveGeometry())
         self.config.sync()
         self.player.stop()
