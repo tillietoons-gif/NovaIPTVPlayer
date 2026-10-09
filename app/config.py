@@ -74,6 +74,65 @@ class AppConfig:
     def sidebar_width(self, value: int) -> None:
         self._s.setValue("ui/sidebar_width", max(64, min(420, value)))
 
+    # -- advanced playback & engine ---------------------------------------
+    @property
+    def hw_acceleration(self) -> str:
+        return str(self._s.value("player/hw_acceleration", "auto"))
+
+    @hw_acceleration.setter
+    def hw_acceleration(self, value: str) -> None:
+        self._s.setValue("player/hw_acceleration", value)
+
+    @property
+    def audio_boost(self) -> str:
+        return str(self._s.value("player/audio_boost", "off"))
+
+    @audio_boost.setter
+    def audio_boost(self, value: str) -> None:
+        self._s.setValue("player/audio_boost", value)
+
+    @property
+    def default_aspect(self) -> str:
+        return str(self._s.value("player/default_aspect", "auto"))
+
+    @default_aspect.setter
+    def default_aspect(self, value: str) -> None:
+        self._s.setValue("player/default_aspect", value)
+
+    @property
+    def external_player(self) -> str:
+        return str(self._s.value("player/external_player", "vlc"))
+
+    @external_player.setter
+    def external_player(self, value: str) -> None:
+        self._s.setValue("player/external_player", value)
+
+    @property
+    def external_player_path(self) -> str:
+        return str(self._s.value("player/external_player_path", ""))
+
+    @external_player_path.setter
+    def external_player_path(self, value: str) -> None:
+        self._s.setValue("player/external_player_path", value)
+
+    @property
+    def user_agent(self) -> str:
+        return str(self._s.value("network/user_agent", "NovaIPTV/2.0"))
+
+    @user_agent.setter
+    def user_agent(self, value: str) -> None:
+        self._s.setValue("network/user_agent", value)
+
+    @property
+    def record_directory(self) -> str:
+        return str(self._s.value("record/directory", ""))
+
+    @record_directory.setter
+    def record_directory(self, value: str) -> None:
+        self._s.setValue("record/directory", value)
+
+    def save(self) -> None:
+        self.sync()
 
     def sync(self) -> None:
         self._s.sync()

@@ -91,6 +91,11 @@ def make_icon(name: str, size: int = 20,
         line(0.40, 0.68, 0.60, 0.68)
         line(0.50, 0.68, 0.50, 0.80)
         line(0.38, 0.80, 0.62, 0.80)
+    elif name in ("grid", "multiview"):
+        p.drawRoundedRect(QRectF(s * 0.18, s * 0.18, s * 0.28, s * 0.28), 2, 2)
+        p.drawRoundedRect(QRectF(s * 0.54, s * 0.18, s * 0.28, s * 0.28), 2, 2)
+        p.drawRoundedRect(QRectF(s * 0.18, s * 0.54, s * 0.28, s * 0.28), 2, 2)
+        p.drawRoundedRect(QRectF(s * 0.54, s * 0.54, s * 0.28, s * 0.28), 2, 2)
     elif name == "film":
         p.drawRoundedRect(QRectF(s * 0.20, s * 0.24, s * 0.60, s * 0.52), 4, 4)
         line(0.36, 0.24, 0.36, 0.76)
@@ -1121,6 +1126,8 @@ class StreamStatsHud(QFrame):
             ("frames", "Frame Sync:"),
             ("fmt", "Container:"),
             ("speed", "Speed:"),
+            ("hw", "GPU / HW Accel:"),
+            ("boost", "Audio Boost:"),
         ]
         for idx, (key, label) in enumerate(fields):
             k_lbl = QLabel(label)
@@ -1167,6 +1174,10 @@ class StreamStatsHud(QFrame):
         self._rows["fmt"].setText(fmt.upper() if fmt else "HLS / Stream")
         spd = info.get("playback_speed", info.get("speed", 1.0))
         self._rows["speed"].setText(f"{spd:.2f}x" if spd != 1.0 else "1.0x Normal")
+        hw = info.get("hw_acceleration", "auto")
+        self._rows["hw"].setText(hw.upper() if hw != "off" else "Disabled (CPU)")
+        boost = info.get("audio_boost", "off")
+        self._rows["boost"].setText(boost.title() if boost != "off" else "Standard")
 
     def close(self) -> bool:
         self.closed.emit()

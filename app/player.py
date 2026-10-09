@@ -60,9 +60,11 @@ _AUDIO_CHANNELS = 2
 _AUDIO_CHUNK = 8192  # bytes per QIODevice write
 
 
-def _open_options(url: str, stream_headers: dict[str, str]) -> dict[str, str]:
-    """Build FFmpeg options, including HTTP compatibility for live streams."""
+def _open_options(url: str, stream_headers: dict[str, str], hw_accel: str = "auto") -> dict[str, str]:
+    """Build FFmpeg options, including HTTP compatibility and hardware acceleration."""
     options = {"rw_timeout": _RW_TIMEOUT_US}
+    if hw_accel and hw_accel != "off":
+        options["hwaccel"] = "d3d11va" if hw_accel == "auto" else hw_accel
     if urlsplit(url).scheme.lower() in ("http", "https"):
         headers = {key.lower(): value for key, value in stream_headers.items()}
         options.update({
@@ -104,10 +106,16 @@ class _DecodeWorker(QThread):
 
     def __init__(self, url: str, volume: int, muted: bool,
                  headers: dict[str, str] | None = None,
+                 hw_accel: str = "auto",
+                 audio_boost: str = "off",
+                 subtitle_offset_ms: int = 0,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.url = url
         self.headers = headers or {}
+        self.hw_accel = hw_accel or "auto"
+        self._audio_boost = audio_boost or "off"
+        self._subtitle_offset_ms = int(subtitle_offset_ms)
         self._volume = volume          # 0..125, polled from GUI thread
         self._muted = muted            # polled from GUI thread
         self._stop_event = threading.Event()
@@ -182,11 +190,17 @@ class _DecodeWorker(QThread):
     def run(self) -> None:  # noqa: C901 - the decode loop is inherently long
         try:
             container = av.open(
-                self.url, options=_open_options(self.url, self.headers))
-        except Exception as exc:
-            self.error_detail = f"Could not open stream: {exc}"
-            self.state_changed.emit("error")
-            return
+                self.url, options=_open_options(self.url, self.headers, self.hw_accel))
+        except Exception:
+            # Fallback to software decode if hardware accel open fails
+            try:
+                container = av.open(
+                    self.url, options=_open_options(self.url, self.headers, "off"))
+                self.hw_accel = "software"
+            except Exception as exc:
+                self.error_detail = f"Could not open stream: {exc}"
+                self.state_changed.emit("error")
+                return
 
         try:
             self._decode_loop(container)
@@ -280,6 +294,8 @@ class _DecodeWorker(QThread):
             "total_bitrate": total_bitrate,
             "duration_ms": duration_ms,
             "url": self.url,
+            "hw_acceleration": self.hw_accel,
+            "audio_boost": self._audio_boost,
         }
         self.media_info_ready.emit(dict(self._media_info))
 
@@ -575,11 +591,31 @@ class _DecodeWorker(QThread):
         self._frames_rendered += 1
         return True
 
+    def _apply_audio_boost(self, data: bytes) -> bytes:
+        if self._audio_boost not in ("dialogue", "night") or not data:
+            return data
+        try:
+            import array
+            samples = array.array('h')
+            samples.frombytes(data)
+            # Dialogue clarity & night mode dynamic range compression
+            for i in range(len(samples)):
+                val = samples[i]
+                if -12000 < val < 12000:
+                    samples[i] = int(val * 1.45)
+                elif val > 28000:
+                    samples[i] = min(32767, int(28000 + (val - 28000) * 0.4))
+                elif val < -28000:
+                    samples[i] = max(-32768, int(-28000 + (val + 28000) * 0.4))
+            return samples.tobytes()
+        except Exception:
+            return data
+
     def _write_audio(self, frame, resampler, device) -> None:
         """Resample to s16/stereo/44.1k and push PCM in ~8 KB chunks."""
         try:
             for af in resampler.resample(frame):
-                data = bytes(af.planes[0])
+                data = self._apply_audio_boost(bytes(af.planes[0]))
                 off = 0
                 while off < len(data):
                     if self._stop_event.is_set():
@@ -627,6 +663,9 @@ class Player(QObject):
         self._last_pos_s = 0.0        # last reported position, seconds
         self._last_dur_s: float | None = None  # last reported duration, s
         self._playback_speed: float = 1.0
+        self._hw_accel: str = "auto"
+        self._audio_boost: str = "off"
+        self._subtitle_offset_ms: int = 0
         self._last_media_info: dict = {}
         self._audio_tracks: list[dict] = []
         self._subtitle_tracks: list[dict] = []
@@ -674,7 +713,11 @@ class Player(QObject):
         self._current_audio_track = 0
         self._current_subtitle_track = -1
         self._worker = _DecodeWorker(
-            url, self._volume, self._muted, dict(headers or {}))
+            url, self._volume, self._muted, dict(headers or {}),
+            hw_accel=self._hw_accel,
+            audio_boost=self._audio_boost,
+            subtitle_offset_ms=self._subtitle_offset_ms,
+        )
         if self._playback_speed != 1.0:
             self._worker.request_speed(self._playback_speed)
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
@@ -859,6 +902,8 @@ class Player(QObject):
             "frames_rendered": 0,
             "frames_dropped": 0,
             "playback_speed": self._playback_speed,
+            "hw_acceleration": self._hw_accel,
+            "audio_boost": self._audio_boost,
         }
         res = dict(defaults)
         res.update(self._last_media_info)
@@ -867,6 +912,8 @@ class Player(QObject):
             res["frames_rendered"] = worker._frames_rendered
             res["frames_dropped"] = worker._frames_dropped
             res["playback_speed"] = worker._playback_speed
+            res["hw_acceleration"] = worker.hw_accel
+            res["audio_boost"] = worker._audio_boost
         return res
 
     def set_speed(self, speed: float) -> None:
@@ -879,3 +926,33 @@ class Player(QObject):
     @property
     def speed(self) -> float:
         return self._playback_speed
+
+    def set_hw_acceleration(self, mode: str) -> None:
+        """Set GPU hardware video acceleration ('auto', 'd3d11va', 'dxva2', 'cuda', 'off')."""
+        self._hw_accel = mode or "auto"
+
+    @property
+    def hw_acceleration(self) -> str:
+        return self._hw_accel
+
+    def set_audio_boost(self, mode: str) -> None:
+        """Set dialogue clarity audio boost ('off', 'dialogue', 'night')."""
+        self._audio_boost = mode or "off"
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker._audio_boost = self._audio_boost
+
+    @property
+    def audio_boost(self) -> str:
+        return self._audio_boost
+
+    def set_subtitle_offset(self, offset_ms: int) -> None:
+        """Set subtitle synchronization offset in milliseconds (±)."""
+        self._subtitle_offset_ms = int(offset_ms)
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker._subtitle_offset_ms = self._subtitle_offset_ms
+
+    @property
+    def subtitle_offset(self) -> int:
+        return self._subtitle_offset_ms

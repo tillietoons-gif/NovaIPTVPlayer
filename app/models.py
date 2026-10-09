@@ -31,10 +31,20 @@ class Channel:
     genre: str = ""
     duration: str = ""
     container_ext: str = ""
+    catchup: bool = False
+    catchup_days: int = 0
+    catchup_source: str = ""
 
     @property
     def display_group(self) -> str:
         return self.group or "Uncategorized"
+
+    def build_catchup_url(self, client, program: EPGProgram) -> str | None:
+        """Construct catchup archive playback URL for this channel and program."""
+        if not self.catchup or not self.stream_id or client is None:
+            return None
+        dur_mins = max(1, int((program.stop - program.start).total_seconds() // 60))
+        return client.timeshift_url(self.stream_id, program.start, dur_mins)
 
 
 @dataclass
@@ -72,6 +82,8 @@ def xtream_live_to_channels(client, streams: list[dict],
     """
     channels: list[Channel] = []
     for s in streams:
+        tv_arch = int(s.get("tv_archive", 0) or 0)
+        arch_dur = int(s.get("tv_archive_duration", 0) or 0)
         channels.append(Channel(
             name=s.get("name", "") or f"Stream {s.get('id', '')}",
             url=client.live_url(s["id"]),
@@ -81,6 +93,8 @@ def xtream_live_to_channels(client, streams: list[dict],
             kind="live",
             provider_id=provider_id,
             stream_id=str(s.get("id", "")),
+            catchup=bool(tv_arch),
+            catchup_days=arch_dur or (3 if tv_arch else 0),
         ))
     return channels
 

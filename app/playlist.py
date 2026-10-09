@@ -98,6 +98,9 @@ def parse_m3u(text: str) -> list[Channel]:
                         group=group,
                         kind=_classify(group, name),
                         stream_headers=pending_headers.copy(),
+                        catchup=bool(pending_attrs.get("catchup") or pending_attrs.get("catchup-type")),
+                        catchup_days=int(pending_attrs.get("catchup-days", 0) or 0),
+                        catchup_source=pending_attrs.get("catchup-source", ""),
                     )
                 )
             pending_name = ""
