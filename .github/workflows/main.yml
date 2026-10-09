@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # needed to create GitHub Releases on tags
+  contents: read
 
 jobs:
   build:
@@ -32,37 +32,38 @@ jobs:
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed `
+          pyinstaller --noconfirm --clean --onefile --windowed `
             --name NovaIPTVPlayer `
             --collect-all PySide6 `
+            --collect-all av `
             main.py
 
-      - name: Zip portable app
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist\NovaIPTVPlayer\* `
-            -DestinationPath NovaIPTVPlayer-windows.zip
+          if (-not (Test-Path "dist\NovaIPTVPlayer.exe")) {
+            throw "PyInstaller did not produce dist\NovaIPTVPlayer.exe"
+          }
 
-      - name: Upload artifact
+      - name: Upload standalone executable
         uses: actions/upload-artifact@v4
         with:
           name: NovaIPTVPlayer-windows
-          path: NovaIPTVPlayer-windows.zip
+          path: dist/NovaIPTVPlayer.exe
           if-no-files-found: error
 
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: NovaIPTVPlayer-windows
-          path: ./dist-zip
+          path: ./dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./dist-zip/NovaIPTVPlayer-windows.zip
+          files: ./dist/NovaIPTVPlayer.exe
           generate_release_notes: true

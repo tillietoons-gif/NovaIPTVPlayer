@@ -855,6 +855,7 @@ class ChannelGrid(QWidget):
     CARD_SPACING = 12
     MIN_COLUMNS = 2
     MAX_COLUMNS = 6
+    PAGE_SIZE = 60
 
     def __init__(self, parent=None, columns: int = 4) -> None:
         super().__init__(parent)
@@ -864,6 +865,10 @@ class ChannelGrid(QWidget):
         self._selected_url: str | None = None
         self._skeletons: list[SkeletonCard] = []
         self._empty_state: EmptyState | None = None
+        self._load_more_button: QPushButton | None = None
+        self._channels: list[Channel] = []
+        self._favorites: set[str] = set()
+        self._epg_lookup = None
         self._rl_timer: QTimer | None = None
 
         outer = QVBoxLayout(self)
@@ -916,6 +921,10 @@ class ChannelGrid(QWidget):
         self._columns = cols
         for i, card in enumerate(self._cards):
             self._grid.addWidget(card, i // cols, i % cols)
+        if self._load_more_button is not None:
+            self._grid.removeWidget(self._load_more_button)
+            row = (len(self._cards) + cols - 1) // cols
+            self._grid.addWidget(self._load_more_button, row, 0, 1, cols)
         self._grid.setColumnStretch(cols, 1)
         # restore scroll once the layout settles, keep selection
         QTimer.singleShot(0, lambda: bar.setValue(min(pos, bar.maximum())))
@@ -931,10 +940,17 @@ class ChannelGrid(QWidget):
             self._grid.removeWidget(sk)
             sk.deleteLater()
         self._skeletons.clear()
+        if self._load_more_button is not None:
+            self._grid.removeWidget(self._load_more_button)
+            self._load_more_button.deleteLater()
+            self._load_more_button = None
         if self._empty_state is not None:
             self._grid.removeWidget(self._empty_state)
             self._empty_state.deleteLater()
             self._empty_state = None
+        self._channels = []
+        self._favorites.clear()
+        self._epg_lookup = None
 
     def show_skeletons(self, count: int = 8) -> None:
         """Show shimmer placeholders while content loads."""
@@ -955,6 +971,9 @@ class ChannelGrid(QWidget):
                      cta_text: str = "",
                      cta_slot=None) -> None:
         self._take_all()
+        self._channels = list(channels)
+        self._favorites = set(favorites)
+        self._epg_lookup = epg_lookup
 
         if not channels:
             self._empty_state = EmptyState(
@@ -966,24 +985,53 @@ class ChannelGrid(QWidget):
 
         cols = self._columns_for_width(self.scroll.viewport().width())
         self._columns = cols
-        for i, ch in enumerate(channels):
+        self._append_channels()
+
+    def _append_channels(self) -> None:
+        start = len(self._cards)
+        end = min(start + self.PAGE_SIZE, len(self._channels))
+        cols = self._columns
+        for i in range(start, end):
+            ch = self._channels[i]
             epg_text = ""
-            if epg_lookup is not None:
+            if self._epg_lookup is not None:
                 try:
-                    epg_text = epg_lookup(ch) or ""
+                    epg_text = self._epg_lookup(ch) or ""
                 except Exception:
                     epg_text = ""
-            card = ChannelCard(ch, ch.url in favorites, epg_text)
+            card = ChannelCard(ch, ch.url in self._favorites, epg_text)
             card.clicked.connect(self.channel_chosen.emit)
             card.fav_toggled.connect(self.fav_toggled.emit)
             card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self._grid.addWidget(card, i // cols, i % cols)
             self._cards.append(card)
-        # keep the last row left-aligned
+
+        if end < len(self._channels):
+            remaining = len(self._channels) - end
+            button = QPushButton(
+                f"Load {min(self.PAGE_SIZE, remaining)} more "
+                f"({remaining} remaining)")
+            button.setObjectName("outlineBtn")
+            button.clicked.connect(self._append_more)
+            row = (end + cols - 1) // cols
+            self._grid.addWidget(button, row, 0, 1, cols)
+            self._load_more_button = button
+
         self._grid.setColumnStretch(cols, 1)
         self.mark_selected(self._selected_url)
 
+    def _append_more(self) -> None:
+        if self._load_more_button is not None:
+            self._grid.removeWidget(self._load_more_button)
+            self._load_more_button.deleteLater()
+            self._load_more_button = None
+        self._append_channels()
+
     def update_favorite(self, channel_url: str, fav: bool) -> None:
+        if fav:
+            self._favorites.add(channel_url)
+        else:
+            self._favorites.discard(channel_url)
         for card in self._cards:
             if card.channel.url == channel_url:
                 card.set_favorite(fav)
