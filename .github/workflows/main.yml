@@ -29,11 +29,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Restore icon assets from base64
+        shell: pwsh
+        run: |
+          # Icon binaries are stored base64-encoded in git (text-only API);
+          # decode them before the build.
+          [IO.File]::WriteAllBytes("assets/icon.ico", [Convert]::FromBase64String((Get-Content "assets/icon.ico.b64" -Raw).Trim()))
+          [IO.File]::WriteAllBytes("assets/icon.png", [Convert]::FromBase64String((Get-Content "assets/icon.png.b64" -Raw).Trim()))
+
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name NovaIPTVPlayer `
+            --icon assets/icon.ico `
+            --add-data "assets;assets" `
             --collect-all PySide6 `
             --collect-all av `
             main.py
