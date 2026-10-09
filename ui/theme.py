@@ -172,6 +172,20 @@ QLabel#qualityBadge {{
     font-size: 8pt;
     font-weight: 700;
 }}
+QLabel#lockBadge {{
+    background: rgba(10, 12, 20, 180);
+    border: 1px solid {c["border"]};
+    border-radius: 12px;
+}}
+QLabel#recLabel {{
+    color: {c["red"]};
+    font-size: 10pt;
+    font-weight: 800;
+}}
+QLabel#pinError {{
+    color: {c["red"]};
+    font-size: 9pt;
+}}
 QLabel#cardName {{
     font-size: 10pt;
     font-weight: 600;

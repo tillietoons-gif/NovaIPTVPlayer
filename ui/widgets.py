@@ -207,6 +207,22 @@ def make_icon(name: str, size: int = 20,
         line(0.42, 0.40, 0.42, 0.68)
         line(0.50, 0.40, 0.50, 0.68)
         line(0.58, 0.40, 0.58, 0.68)
+    elif name == "lock":
+        p.drawPolyline([QPointF(s * 0.36, s * 0.50),     # shackle
+                        QPointF(s * 0.36, s * 0.34),
+                        QPointF(s * 0.64, s * 0.34),
+                        QPointF(s * 0.64, s * 0.50)])
+        p.drawRoundedRect(QRectF(s * 0.28, s * 0.46, s * 0.44, s * 0.36),
+                          4, 4)                           # body
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(s * 0.50, s * 0.62),
+                      s * 0.04, s * 0.04)                 # keyhole
+    elif name == "rec":
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(s * 0.50, s * 0.50),
+                      s * 0.30, s * 0.30)                 # record dot
     p.end()
     return QIcon(pm)
 
@@ -773,6 +789,14 @@ class _LogoArea(QWidget):
         self.quality_badge = QLabel(quality_of(channel), self)
         self.quality_badge.setObjectName("qualityBadge")
 
+        self.lock_badge = QLabel(self)
+        self.lock_badge.setObjectName("lockBadge")
+        self.lock_badge.setPixmap(
+            make_icon("lock", 14, COLORS["text"]).pixmap(14, 14))
+        self.lock_badge.setAlignment(Qt.AlignCenter)
+        self.lock_badge.setFixedSize(24, 24)
+        self.lock_badge.setVisible(False)
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.live_badge.adjustSize()
@@ -780,6 +804,11 @@ class _LogoArea(QWidget):
         self.quality_badge.adjustSize()
         self.quality_badge.move(
             self.width() - self.quality_badge.width() - 6, 6)
+        # lock badge sits bottom-right, clear of the quality badge
+        self.lock_badge.move(self.width() - 30, self.height() - 30)
+
+    def set_locked(self, locked: bool) -> None:
+        self.lock_badge.setVisible(locked)
 
 
 class ChannelCard(QFrame):
@@ -849,6 +878,10 @@ class ChannelCard(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def set_locked(self, locked: bool) -> None:
+        """Show/hide the parental-lock badge on the channel's logo."""
+        self.area.set_locked(locked)
+
 
 class ChannelGrid(QWidget):
     """Scrollable grid of ChannelCards with responsive column count.
@@ -873,6 +906,7 @@ class ChannelGrid(QWidget):
         self._max_columns = self.MAX_COLUMNS
         self._cards: list[ChannelCard] = []
         self._selected_url: str | None = None
+        self._locked_groups: set[str] = set()
         self._skeletons: list[SkeletonCard] = []
         self._empty_state: EmptyState | None = None
         self._load_more_button: QPushButton | None = None
@@ -1012,6 +1046,7 @@ class ChannelGrid(QWidget):
             card = ChannelCard(ch, ch.url in self._favorites, epg_text)
             card.clicked.connect(self.channel_chosen.emit)
             card.fav_toggled.connect(self.fav_toggled.emit)
+            card.set_locked(ch.display_group in self._locked_groups)
             card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self._grid.addWidget(card, i // cols, i % cols)
             self._cards.append(card)
@@ -1050,6 +1085,15 @@ class ChannelGrid(QWidget):
         self._selected_url = channel_url
         for card in self._cards:
             card.set_selected(card.channel.url == channel_url)
+
+    def set_locked_groups(self, groups: set[str]) -> None:
+        """Remember which categories are locked and refresh all badges."""
+        self._locked_groups = set(groups)
+        self.refresh_locks()
+
+    def refresh_locks(self) -> None:
+        for card in self._cards:
+            card.set_locked(card.channel.display_group in self._locked_groups)
 
 
 # -- poster card (continue watching) --------------------------------------------
