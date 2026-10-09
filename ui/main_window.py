@@ -9,8 +9,9 @@ from urllib.parse import urlparse
 
 from PySide6.QtCore import (
     Qt, QThread, Signal, QPoint, QTimer, QPropertyAnimation,
-    QAbstractAnimation,
+    QAbstractAnimation, QUrl,
 )
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QPushButton,
     QStackedWidget, QLabel, QSlider, QComboBox, QMessageBox,
@@ -22,12 +23,19 @@ from app import __app_name__, __version__
 from app.config import AppConfig
 from app.epg import EPGManager
 from app.favorites import FavoritesStore
-from app.models import Channel, EPGProgram
+from app.models import (
+    Channel, EPGProgram, xtream_live_to_channels, xtream_vod_to_channels,
+    xtream_vod_detail_to_channel, xtream_series_to_channels,
+    xtream_episodes_to_channels,
+)
 from app.player import Player
 from app.playlist import (
     load_playlist, categories, filter_channels,
 )
+from app.profiles import ProfileStore, ProviderProfile, migrate_legacy
+from app.xtream import XtreamClient, XtreamError
 from ui.dialogs import AddPlaylistDialog, SettingsDialog
+from ui.login import LoginScreen
 from ui.theme import COLORS, animations_enabled
 from ui.widgets import (
     ChannelGrid, SearchBar, VideoWidget, NavButton, IconButton, WinButton,
@@ -70,6 +78,96 @@ class _EpgLoader(QThread):
             self.finished_ok.emit(count)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class _XtreamLoader(QThread):
+    """Log in to an Xtream panel and pull live/VOD/series listings."""
+
+    finished_ok = Signal(object)  # payload dict (client, user_info, channels…)
+    failed = Signal(str)
+
+    def __init__(self, profile: ProviderProfile) -> None:
+        super().__init__()
+        self.profile = profile
+
+    def run(self) -> None:  # worker thread
+        try:
+            client = XtreamClient(self.profile.server,
+                                  self.profile.username,
+                                  self.profile.password)
+            info = client.login()
+            pid = self.profile.id
+
+            live_streams = client.live_streams()
+            vod_streams = client.vod_streams()
+            series_entries = client.series_list()
+            live_cats = dict(client.live_categories())
+            vod_cats = dict(client.vod_categories())
+            series_cats = dict(client.series_categories())
+
+            live = xtream_live_to_channels(client, live_streams, pid)
+            for ch, s in zip(live, live_streams):
+                ch.group = live_cats.get(s.get("category_id", ""), "")
+            vod = xtream_vod_to_channels(client, vod_streams, pid)
+            for ch, s in zip(vod, vod_streams):
+                ch.group = vod_cats.get(s.get("category_id", ""), "")
+            series = xtream_series_to_channels(client, series_entries, pid)
+            for ch, s in zip(series, series_entries):
+                ch.group = series_cats.get(s.get("category_id", ""), "")
+
+            self.finished_ok.emit({
+                "client": client,
+                "user_info": info["user_info"],
+                "server_info": info["server_info"],
+                "channels": live + vod + series,
+                "epg_url": client.xmltv_url(),
+            })
+        except XtreamError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # never crash the thread silently
+            self.failed.emit(f"Unexpected error: {exc}")
+
+
+class _SeriesInfoLoader(QThread):
+    """Fetch series_info() (seasons + episodes) for one series."""
+
+    finished_ok = Signal(object)  # {"series_id": ..., "info": ...}
+    failed = Signal(str)
+
+    def __init__(self, client: XtreamClient, series_id: str) -> None:
+        super().__init__()
+        self.client = client
+        self.series_id = series_id
+
+    def run(self) -> None:  # worker thread
+        try:
+            info = self.client.series_info(self.series_id)
+            self.finished_ok.emit(
+                {"series_id": self.series_id, "info": info})
+        except XtreamError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(f"Unexpected error: {exc}")
+
+
+class _VodInfoLoader(QThread):
+    """Fetch vod_info() for one movie."""
+
+    finished_ok = Signal(object)  # vod_info dict
+    failed = Signal(str)
+
+    def __init__(self, client: XtreamClient, vod_id: str) -> None:
+        super().__init__()
+        self.client = client
+        self.vod_id = vod_id
+
+    def run(self) -> None:  # worker thread
+        try:
+            self.finished_ok.emit(self.client.vod_info(self.vod_id))
+        except XtreamError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(f"Unexpected error: {exc}")
 
 
 # -- small helpers ---------------------------------------------------------------
@@ -132,14 +230,22 @@ class _FullscreenVideo(QDialog):
 
 
 class _ConnectionDialog(QDialog):
-    def __init__(self, config: AppConfig, stats: dict, parent=None) -> None:
+    def __init__(self, profile: ProviderProfile | None, stats: dict,
+                 expiry_text: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Connection")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
         lay = QVBoxLayout(self)
         form = QFormLayout()
-        form.addRow("Playlist:", QLabel(config.playlist_source or "Not configured"))
-        form.addRow("Guide (XMLTV):", QLabel(config.epg_source or "Not configured"))
+        if profile is None:
+            form.addRow("Provider:", QLabel("Not configured"))
+        else:
+            form.addRow("Provider:", QLabel(profile.name))
+            form.addRow("Type:", QLabel(
+                "Xtream Codes" if profile.is_xtream() else "M3U Playlist"))
+            form.addRow("Source:", QLabel(profile.redacted()))
+            if profile.is_xtream() and expiry_text:
+                form.addRow("Account expires:", QLabel(expiry_text))
         form.addRow("Channels loaded:", QLabel(str(stats.get("channels", 0))))
         ok = stats.get("channels", 0) > 0
         status = QLabel("Connected" if ok else "Offline")
@@ -188,6 +294,171 @@ class _DetailsDialog(QDialog):
         lay.addWidget(buttons)
 
 
+def _trailer_url(raw: str) -> str:
+    """Normalize a youtube_trailer value to a watchable URL."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http"):
+        return raw
+    if " " not in raw and len(raw) <= 20:  # probably a bare video id
+        return f"https://www.youtube.com/watch?v={raw}"
+    return raw
+
+
+class _MovieDetailsDialog(QDialog):
+    """Smarters-style movie details: poster, metadata, trailer, play."""
+
+    play_requested = Signal(object)       # Channel (enriched when possible)
+    fav_changed = Signal(object, bool)    # channel, new favorite state
+
+    def __init__(self, channel: Channel, client: XtreamClient | None,
+                 provider_id: str, is_fav: bool, parent=None) -> None:
+        super().__init__(parent)
+        self._channel = channel
+        self._client = client
+        self._provider_id = provider_id
+        self._enriched: Channel | None = None
+        self._fav = is_fav
+        self._trailer = ""
+        self._info_loader: _VodInfoLoader | None = None
+
+        self.setWindowTitle(channel.name)
+        self.setMinimumWidth(620)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 20)
+        lay.setSpacing(12)
+
+        top = QHBoxLayout()
+        top.setSpacing(18)
+        self.poster = LogoLabel(150)
+        self.poster.load(channel.logo)
+        top.addWidget(self.poster, 0, Qt.AlignTop)
+
+        info = QVBoxLayout()
+        info.setSpacing(6)
+        self.f_title = QLabel(channel.name)
+        self.f_title.setObjectName("dlgTitle")
+        self.f_title.setWordWrap(True)
+        info.addWidget(self.f_title)
+        self.f_meta = QLabel("")
+        self.f_meta.setObjectName("cardMeta")
+        info.addWidget(self.f_meta)
+        self.f_rating = QLabel("")
+        self.f_rating.setObjectName("goldLabel")
+        info.addWidget(self.f_rating)
+        self.f_plot = QLabel("Loading details…")
+        self.f_plot.setObjectName("plotLabel")
+        self.f_plot.setWordWrap(True)
+        info.addWidget(self.f_plot)
+        self.f_cast = QLabel("")
+        self.f_cast.setObjectName("cardMeta")
+        self.f_cast.setWordWrap(True)
+        info.addWidget(self.f_cast)
+        self.f_director = QLabel("")
+        self.f_director.setObjectName("cardMeta")
+        self.f_director.setWordWrap(True)
+        info.addWidget(self.f_director)
+        info.addStretch(1)
+        top.addLayout(info, 1)
+        lay.addLayout(top)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self.trailer_btn = QPushButton("  Watch trailer")
+        self.trailer_btn.setObjectName("outlineBtn")
+        self.trailer_btn.setIcon(make_icon("play", 14))
+        self.trailer_btn.setCursor(Qt.PointingHandCursor)
+        self.trailer_btn.clicked.connect(self._open_trailer)
+        self.trailer_btn.hide()
+        btn_row.addWidget(self.trailer_btn)
+        btn_row.addStretch(1)
+        self.fav_btn = QPushButton()
+        self.fav_btn.setObjectName("outlineBtn")
+        self.fav_btn.setCursor(Qt.PointingHandCursor)
+        self.fav_btn.clicked.connect(self._toggle_fav)
+        self._refresh_fav_btn()
+        btn_row.addWidget(self.fav_btn)
+        self.play_btn = QPushButton("  Play")
+        self.play_btn.setObjectName("primaryBtn")
+        self.play_btn.setIcon(make_icon("play", 16, "white"))
+        self.play_btn.setCursor(Qt.PointingHandCursor)
+        self.play_btn.clicked.connect(self._on_play)
+        btn_row.addWidget(self.play_btn)
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("outlineBtn")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+
+        # fill in what we already know; enrich via vod_info for Xtream
+        self._fill_basic()
+        if (self._client is not None and channel.stream_id
+                and channel.kind == "movie"):
+            self._info_loader = _VodInfoLoader(self._client,
+                                               channel.stream_id)
+            self._info_loader.finished_ok.connect(self._on_info)
+            self._info_loader.failed.connect(self._on_info_failed)
+            self._info_loader.start()
+        else:
+            self._fill_from_channel()
+
+    # -- content -----------------------------------------------------------
+    def _fill_basic(self) -> None:
+        ch = self._channel
+        meta = "  •  ".join(p for p in (ch.year, ch.genre, ch.duration) if p)
+        self.f_meta.setText(meta or ch.display_group)
+
+    def _fill_from_channel(self) -> None:
+        """Show the channel's own metadata (M3U path / vod_info failed)."""
+        ch = self._enriched or self._channel
+        self.f_title.setText(ch.name)
+        meta = "  •  ".join(p for p in (ch.year, ch.genre, ch.duration) if p)
+        self.f_meta.setText(meta or ch.display_group)
+        self.f_rating.setText(f"★ {ch.rating}" if ch.rating else "")
+        self.f_plot.setText(ch.plot or "No synopsis available.")
+        self.f_cast.setText(f"Cast: {ch.cast}" if ch.cast else "")
+        self.f_director.setText(
+            f"Director: {ch.director}" if ch.director else "")
+        if ch.logo:
+            self.poster.load(ch.logo)
+
+    def _on_info(self, info: dict) -> None:
+        self._enriched = xtream_vod_detail_to_channel(
+            self._client, self._channel.stream_id, info, self._provider_id)
+        self._trailer = _trailer_url(info.get("youtube_trailer", ""))
+        self.trailer_btn.setVisible(bool(self._trailer))
+        self._fill_from_channel()
+
+    def _on_info_failed(self, msg: str) -> None:
+        self._fill_from_channel()
+        self.f_plot.setText(
+            f"Could not load full details ({msg}).\n"
+            "You can still play the movie.")
+
+    # -- actions -------------------------------------------------------------
+    def _refresh_fav_btn(self) -> None:
+        self.fav_btn.setText(
+            "  ★ Favorited" if self._fav else "  ☆ Add to favorites")
+        self.fav_btn.setIcon(make_icon(
+            "star" if self._fav else "star_outline", 14,
+            "#fbbf24" if self._fav else COLORS["text"]))
+
+    def _toggle_fav(self) -> None:
+        self._fav = not self._fav
+        self._refresh_fav_btn()
+        self.fav_changed.emit(self._channel, self._fav)
+
+    def _open_trailer(self) -> None:
+        if self._trailer:
+            QDesktopServices.openUrl(QUrl(self._trailer))
+
+    def _on_play(self) -> None:
+        self.play_requested.emit(self._enriched or self._channel)
+        self.accept()
+
+
 # -- main window ---------------------------------------------------------------
 
 NAV_ITEMS = [
@@ -198,7 +469,7 @@ NAV_ITEMS = [
     ("catchup", "Catch-up", "replay"),
     ("favorites", "Favorites", "star"),
     ("history", "Recently Watched", "history"),
-    ("playlists", "Playlists", "list"),
+    ("playlists", "Providers", "list"),
 ]
 
 
@@ -226,6 +497,18 @@ class MainWindow(QMainWindow):
         self.epg = EPGManager()
         self.player = Player(self)
 
+        # provider profiles (Smarters-Pro style); migrate legacy settings once
+        migrate_legacy(self.config)
+        self.profiles = ProfileStore()
+        self._profile: ProviderProfile | None = self.profiles.active()
+        self._xtream: XtreamClient | None = None
+        self._xtream_user: dict = {}
+        self._xloader: _XtreamLoader | None = None
+        self._series_cache: dict[str, dict] = {}
+        self._series_episodes: list[Channel] = []
+        self._series_detail_id: str | None = None
+        self._series_loader: _SeriesInfoLoader | None = None
+
         self.channels: list[Channel] = []
         self.history: list[tuple[str, str, str]] = []  # (name, url, played_at)
         self._progress: dict[str, tuple[int, int]] = {}  # url -> (pos_ms, dur_ms)
@@ -245,16 +528,22 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_player()
+        self._build_login_overlay()
         self._refresh_home()
 
         geom = self.config.window_geometry
         if geom:
             self.restoreGeometry(geom)
 
-        if self.config.playlist_source:
+        if self._profile is not None:
+            self._load_profile(self._profile)
+        elif self.config.playlist_source and not self.profiles.exists():
+            # legacy fallback: no profiles file and migration found nothing
             self._load_playlist(self.config.playlist_source, silent=True)
-        if self.config.epg_source:
-            self._load_epg(self.config.epg_source, silent=True)
+            if self.config.epg_source:
+                self._load_epg(self.config.epg_source, silent=True)
+        else:
+            self._show_login()
         if not Player.is_available():
             err = Player.import_error()
             QMessageBox.warning(
@@ -287,6 +576,9 @@ class MainWindow(QMainWindow):
         content = QVBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(0)
+        self._account_banner = self._build_account_banner()
+        self._account_banner.hide()
+        content.addWidget(self._account_banner)
         self.stack = QStackedWidget()
         self._pages: dict[str, QWidget] = {}
         for key, _label, _icon in NAV_ITEMS:
@@ -394,7 +686,17 @@ class MainWindow(QMainWindow):
         brand.addWidget(title)
         brand.addStretch(1)
         lay.addLayout(brand)
-        lay.addSpacing(14)
+        lay.addSpacing(10)
+
+        # provider switcher (under the logo)
+        self.provider_btn = QPushButton()
+        self.provider_btn.setObjectName("providerBtn")
+        self.provider_btn.setCursor(Qt.PointingHandCursor)
+        self.provider_btn.setToolTip("Switch provider")
+        self.provider_btn.clicked.connect(self._show_provider_menu)
+        lay.addWidget(self.provider_btn)
+        lay.addSpacing(10)
+        self._refresh_provider_btn()
 
         self._nav_btns: dict[str, NavButton] = {}
         for key, label, icon in NAV_ITEMS:
@@ -405,9 +707,9 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
 
         self._side_action_btns: list[NavButton] = []
-        mgr = NavButton("folder", "Playlist manager")
+        mgr = NavButton("folder", "Add provider")
         mgr.setCheckable(False)
-        mgr.clicked.connect(self._open_add_dialog)
+        mgr.clicked.connect(self._show_login)
         lay.addWidget(mgr)
         self._side_action_btns.append(mgr)
         conn = NavButton("signal", "Connection")
@@ -458,6 +760,169 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.stream_label)
         return bar
 
+    # -- account banner (inactive/expired Xtream account) -------------------
+    def _build_account_banner(self) -> QFrame:
+        banner = QFrame()
+        banner.setObjectName("accountBanner")
+        lay = QHBoxLayout(banner)
+        lay.setContentsMargins(14, 8, 10, 8)
+        lay.setSpacing(10)
+        icon = QLabel()
+        icon.setPixmap(make_icon("bell", 18, COLORS["red"]).pixmap(18, 18))
+        lay.addWidget(icon)
+        self._banner_text = QLabel("")
+        self._banner_text.setWordWrap(True)
+        lay.addWidget(self._banner_text, 1)
+        close = IconButton("close", 16)
+        close.setToolTip("Dismiss")
+        close.clicked.connect(self._hide_account_banner)
+        lay.addWidget(close)
+        return banner
+
+    def _show_account_banner(self, message: str) -> None:
+        self._banner_text.setText(message)
+        self._account_banner.show()
+
+    def _hide_account_banner(self) -> None:
+        self._account_banner.hide()
+
+    # -- login overlay ------------------------------------------------------
+    def _build_login_overlay(self) -> None:
+        central = self.centralWidget()
+        self._login_overlay = QWidget(central)
+        self._login_overlay.setObjectName("loginOverlay")
+        lay = QVBoxLayout(self._login_overlay)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._login_screen = LoginScreen(self.profiles, self._login_overlay)
+        self._login_screen.authenticated.connect(self._on_authenticated)
+        self._login_screen.back_btn.clicked.connect(self._hide_login)
+        lay.addWidget(self._login_screen)
+        self._login_overlay.hide()
+
+    def _show_login(self) -> None:
+        """Show the provider login screen over the main window."""
+        self._login_screen.reset()
+        self._login_screen.set_cancellable(self._profile is not None)
+        central = self.centralWidget()
+        if central is not None:
+            self._login_overlay.setGeometry(central.rect())
+        self._login_overlay.show()
+        self._login_overlay.raise_()
+
+    def _hide_login(self) -> None:
+        if self._profile is None:
+            return  # login is required; cannot dismiss
+        self._login_overlay.hide()
+
+    def _on_authenticated(self, profile: ProviderProfile) -> None:
+        self._profile = profile
+        self._hide_login()
+        self._clear_content()
+        self._refresh_provider_btn()
+        self._navigate("home")
+        self._load_profile(profile)
+
+    # -- provider switcher --------------------------------------------------
+    def _provider_expiry_text(self) -> str:
+        if self._xtream is None:
+            return ""
+        exp = self._xtream.account_expiry()
+        if exp is None:
+            return "No expiry"
+        return "Exp " + exp.strftime("%d %b %Y")
+
+    def _refresh_provider_btn(self) -> None:
+        p = self._profile
+        if p is None:
+            self.provider_btn.setText("No provider\nTap to add one")
+            return
+        if p.is_xtream():
+            sub = f"Xtream • {self._provider_expiry_text() or '…'}"
+        else:
+            sub = "M3U Playlist"
+        self.provider_btn.setText(f"{p.name}\n{sub}")
+
+    def _show_provider_menu(self) -> None:
+        menu = QMenu(self)
+        header = menu.addAction("Providers")
+        header.setEnabled(False)
+        for p in self.profiles.all():
+            act = menu.addAction(f"{p.name}  ({p.kind})")
+            act.setCheckable(True)
+            act.setChecked(self._profile is not None
+                           and p.id == self._profile.id)
+            act.triggered.connect(partial(self._switch_profile_by_id, p.id))
+        menu.addSeparator()
+        add_act = menu.addAction("Add provider…")
+        add_act.triggered.connect(self._show_login)
+        if self._profile is not None:
+            rem_act = menu.addAction("Remove provider…")
+            rem_act.triggered.connect(self._remove_provider)
+        menu.exec(self.provider_btn.mapToGlobal(
+            QPoint(0, self.provider_btn.height())))
+
+    def _switch_profile_by_id(self, profile_id: str) -> None:
+        if self._profile is not None and profile_id == self._profile.id:
+            return
+        profile = self.profiles.get(profile_id)
+        if profile is None:
+            return
+        self.profiles.set_active(profile_id)
+        self._profile = profile
+        self._clear_content()
+        self._refresh_provider_btn()
+        self._load_profile(profile)
+
+    def _remove_provider(self) -> None:
+        """Remove the active provider after confirmation."""
+        p = self._profile
+        if p is None:
+            return
+        answer = QMessageBox.question(
+            self, "Remove provider",
+            f"Remove the provider \"{p.name}\"?\n\n"
+            "Its channels, movies and series will be unloaded and "
+            "playback will stop. Your favorites are kept and will "
+            "reappear if you add the provider again.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.profiles.remove(p.id)
+        self._profile = self.profiles.active()
+        self._clear_content()
+        self._refresh_provider_btn()
+        if self._profile is not None:
+            self._load_profile(self._profile)
+        else:
+            self._show_login()
+
+    def _clear_content(self) -> None:
+        """Unload everything (profile switch / provider removal)."""
+        self.player.stop()
+        self.channels = []
+        self.epg = EPGManager()
+        self._xtream = None
+        self._xtream_user = {}
+        self._series_cache.clear()
+        self._series_episodes = []
+        self._series_detail_id = None
+        self._play_context = []
+        self._play_index = -1
+        self._current_channel = None
+        self.thumb_video.clear()
+        self.np_title.setText("Nothing playing")
+        self.np_meta.setText("")
+        self.pp_btn.setIcon(make_icon("play", 18))
+        self._hide_account_banner()
+        self._close_series_detail()
+        self._update_now_next()
+        self._update_status()
+        self._update_bell()
+        self._refresh_grid()
+        self._refresh_home()
+        if self._current_page == "playlists":
+            self._refresh_providers_page()
+
     # -- responsive -----------------------------------------------------------
     # Breakpoints (window width):
     #   >= 1280 : full sidebar + docked right panel
@@ -483,6 +948,8 @@ class MainWindow(QMainWindow):
             self._drawer.layout_host()
         if hasattr(self, "_search_overlay") and self._search_overlay.isVisible():
             self._position_search_overlay()
+        if hasattr(self, "_login_overlay") and self._login_overlay.isVisible():
+            self._login_overlay.setGeometry(central.rect())
 
     def _apply_breakpoints(self) -> None:
         w = self.width()
@@ -523,6 +990,7 @@ class MainWindow(QMainWindow):
         self._brand_title.setVisible(not compact)
         self._user_name.setVisible(not compact)
         self._ver_label.setVisible(not compact)
+        self.provider_btn.setVisible(not compact)
 
     # -- right panel: docked vs drawer --------------------------------------
     def _apply_panel_mode(self) -> None:
@@ -598,6 +1066,15 @@ class MainWindow(QMainWindow):
     # -- keyboard shortcuts ---------------------------------------------------
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
+        if (hasattr(self, "_login_overlay")
+                and self._login_overlay.isVisible()):
+            # login screen owns the keyboard; only Esc (when cancellable)
+            if key == Qt.Key_Escape:
+                self._hide_login()
+                event.accept()
+            else:
+                super().keyPressEvent(event)
+            return
         if key == Qt.Key_Escape:
             if self._drawer.is_open():
                 self._drawer.hide()
@@ -644,7 +1121,9 @@ class MainWindow(QMainWindow):
     def _build_page(self, key: str) -> QWidget:
         if key == "home":
             return self._build_home_page()
-        if key in ("live", "movie", "series"):
+        if key == "series":
+            return self._build_series_page()
+        if key in ("live", "movie"):
             return self._build_grid_page(key)
         if key == "catchup":
             return self._build_catchup_page()
@@ -658,6 +1137,213 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(page)
         lay.addWidget(QLabel("Unknown page"))
         return page
+
+    # -- series browser (grid -> detail -> episodes) --------------------------
+    def _build_series_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.series_stack = QStackedWidget()
+        lay.addWidget(self.series_stack)
+        self.series_stack.addWidget(self._build_grid_page("series"))
+        self.series_stack.addWidget(self._build_series_detail_page())
+        return page
+
+    def _build_series_detail_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 18, 26, 18)
+        lay.setSpacing(10)
+
+        top = QHBoxLayout()
+        back = QPushButton("  Back")
+        back.setObjectName("outlineBtn")
+        back.setIcon(make_icon("prev", 14))
+        back.setCursor(Qt.PointingHandCursor)
+        back.clicked.connect(self._close_series_detail)
+        top.addWidget(back)
+        self.series_title = QLabel("")
+        self.series_title.setObjectName("pageTitle")
+        top.addWidget(self.series_title, 1)
+        self.series_season_box = QComboBox()
+        self.series_season_box.setMinimumWidth(160)
+        self.series_season_box.currentIndexChanged.connect(
+            self._on_season_changed)
+        top.addWidget(self.series_season_box)
+        lay.addLayout(top)
+
+        info_row = QHBoxLayout()
+        info_row.setSpacing(16)
+        self.series_cover = LogoLabel(120)
+        info_row.addWidget(self.series_cover, 0, Qt.AlignTop)
+        info_txt = QVBoxLayout()
+        info_txt.setSpacing(4)
+        self.series_meta = QLabel("")
+        self.series_meta.setObjectName("cardMeta")
+        info_txt.addWidget(self.series_meta)
+        self.series_plot = QLabel("")
+        self.series_plot.setObjectName("plotLabel")
+        self.series_plot.setWordWrap(True)
+        info_txt.addWidget(self.series_plot)
+        info_txt.addStretch(1)
+        info_row.addLayout(info_txt, 1)
+        lay.addLayout(info_row)
+
+        self.series_loading = QLabel("Loading episodes…")
+        self.series_loading.setObjectName("cardMeta")
+        self.series_loading.hide()
+        lay.addWidget(self.series_loading)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(scroll, 1)
+        self._series_eps_inner = QWidget()
+        self.series_eps_lay = QVBoxLayout(self._series_eps_inner)
+        self.series_eps_lay.setSpacing(8)
+        self.series_eps_lay.setContentsMargins(2, 2, 2, 2)
+        scroll.setWidget(self._series_eps_inner)
+        return page
+
+    def _open_series_detail(self, channel: Channel) -> None:
+        """Smarters-style drill-down: series -> seasons -> episodes."""
+        if self._xtream is None or not channel.series_id:
+            self.play_channel(
+                channel, self._context_lists.get("series", [channel]))
+            return
+        self._series_detail_id = channel.series_id
+        self.series_title.setText(channel.name)
+        self.series_cover.load(channel.logo)
+        self.series_meta.setText("")
+        self.series_plot.setText("")
+        self._clear_layout(self.series_eps_lay)
+        self.series_season_box.blockSignals(True)
+        self.series_season_box.clear()
+        self.series_season_box.blockSignals(False)
+        self.series_stack.setCurrentIndex(1)
+        self._load_series_info(channel.series_id)
+
+    def _load_series_info(self, series_id: str) -> None:
+        """Fetch (or reuse cached) series_info for the requested series."""
+        cached = self._series_cache.get(series_id)
+        if cached is not None:
+            self._show_series_info(series_id, cached)
+            return
+        self.series_loading.show()
+        if self._series_loader and self._series_loader.isRunning():
+            return  # completion handler picks up the pending series id
+        self._series_loader = _SeriesInfoLoader(
+            self._xtream, series_id)
+        self._series_loader.finished_ok.connect(self._on_series_info)
+        self._series_loader.failed.connect(self._on_series_info_failed)
+        self._series_loader.start()
+
+    def _close_series_detail(self) -> None:
+        if hasattr(self, "series_stack"):
+            self.series_stack.setCurrentIndex(0)
+
+    def _on_series_info(self, payload: dict) -> None:
+        series_id = payload["series_id"]
+        if series_id != self._series_detail_id:
+            # a newer series was requested while this loaded; load it now
+            if self._series_detail_id:
+                self._load_series_info(self._series_detail_id)
+            return
+        info = payload["info"]
+        self._series_cache[series_id] = info
+        self._show_series_info(series_id, info)
+
+    def _on_series_info_failed(self, msg: str) -> None:
+        loader = self.sender()
+        failed_id = getattr(loader, "series_id", None)
+        if failed_id != self._series_detail_id:
+            # stale failure; load whatever is currently requested
+            if self._series_detail_id:
+                self._load_series_info(self._series_detail_id)
+            return
+        self.series_loading.hide()
+        self.series_plot.setText(f"Could not load episodes:\n{msg}")
+
+    def _show_series_info(self, series_id: str, info: dict) -> None:
+        self.series_loading.hide()
+        name = info.get("name", "") or self.series_title.text()
+        self.series_title.setText(name)
+        meta = "  •  ".join(
+            p for p in (info.get("genre", ""),
+                        f"★ {info['rating']}" if info.get("rating") else "")
+            if p)
+        self.series_meta.setText(meta)
+        self.series_plot.setText(info.get("plot", ""))
+        if info.get("cover"):
+            self.series_cover.load(info["cover"])
+        seasons = info.get("seasons", {}) or {}
+        nums = sorted(seasons,
+                      key=lambda k: int(k) if str(k).isdigit() else 0)
+        self.series_season_box.blockSignals(True)
+        self.series_season_box.clear()
+        for n in nums:
+            count = len(seasons.get(n, []) or [])
+            self.series_season_box.addItem(
+                f"Season {n} ({count} episodes)", n)
+        self.series_season_box.blockSignals(False)
+        pid = self._profile.id if self._profile else ""
+        self._series_episodes = xtream_episodes_to_channels(
+            self._xtream, series_id, name, seasons, pid)
+        self._render_episodes(nums[0] if nums else None)
+
+    def _on_season_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        self._render_episodes(self.series_season_box.itemData(index))
+
+    def _render_episodes(self, season_num) -> None:
+        self._clear_layout(self.series_eps_lay)
+        eps = [c for c in self._series_episodes
+               if c.season == str(season_num)]
+        if not eps:
+            lbl = QLabel("No episodes found for this season.")
+            lbl.setObjectName("cardMeta")
+            self.series_eps_lay.addWidget(lbl)
+        for ch in eps:
+            row = _ClickableRow(ch)
+            row.setObjectName("sideCard")
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(14, 10, 14, 10)
+            hl.setSpacing(12)
+            badge = QLabel(f"E{ch.episode_num or '?'}")
+            badge.setObjectName("upTime")
+            badge.setFixedWidth(44)
+            hl.addWidget(badge)
+            txt = QVBoxLayout()
+            txt.setSpacing(2)
+            title = QLabel(ch.name)
+            title.setObjectName("upTitle")
+            title.setWordWrap(True)
+            txt.addWidget(title)
+            if ch.plot:
+                plot = QLabel(ch.plot)
+                plot.setObjectName("cardMeta")
+                plot.setWordWrap(True)
+                plot.setMaximumHeight(40)
+                txt.addWidget(plot)
+            hl.addLayout(txt, 1)
+            if ch.duration:
+                dur = QLabel(ch.duration)
+                dur.setObjectName("cardMeta")
+                hl.addWidget(dur)
+            play = IconButton("play", 18)
+            play.setToolTip("Play episode")
+            hl.addWidget(play)
+            season_eps = [e for e in self._series_episodes
+                          if e.season == ch.season]
+
+            def _play_episode(_payload=None, c=ch, ctx=season_eps):
+                self.play_channel(c, ctx)
+
+            row.clicked.connect(_play_episode)
+            play.clicked.connect(lambda _=False: _play_episode())
+            self.series_eps_lay.addWidget(row)
+        self.series_eps_lay.addStretch(1)
 
     def _page_header(self, title: str) -> QHBoxLayout:
         lay = QHBoxLayout()
@@ -780,7 +1466,7 @@ class MainWindow(QMainWindow):
         reload_btn = QPushButton("Reload guide")
         reload_btn.setObjectName("outlineBtn")
         reload_btn.clicked.connect(
-            lambda: self._load_epg(self.config.epg_source))
+            lambda: self._load_epg(self._guide_source()))
         head.addWidget(reload_btn)
         lay.addLayout(head)
         scroll = QScrollArea()
@@ -812,91 +1498,115 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_playlists_page(self) -> QWidget:
+        """Providers page (kept under the legacy 'playlists' nav key)."""
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(26, 18, 26, 18)
         lay.setSpacing(12)
-        lay.addLayout(self._page_header("Playlists"))
-        self.playlist_card = QFrame()
-        self.playlist_card.setObjectName("sideCard")
-        lay.addWidget(self.playlist_card)
+        lay.addLayout(self._page_header("Providers"))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(scroll, 1)
+        self._providers_inner = QWidget()
+        self._providers_lay = QVBoxLayout(self._providers_inner)
+        self._providers_lay.setSpacing(10)
+        self._providers_lay.setContentsMargins(2, 2, 2, 2)
+        scroll.setWidget(self._providers_inner)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
-        add_btn = QPushButton("  Add playlist")
+        add_btn = QPushButton("  Add provider")
         add_btn.setObjectName("primaryBtn")
         add_btn.setIcon(make_icon("plus", 16, "white"))
         add_btn.setCursor(Qt.PointingHandCursor)
-        add_btn.clicked.connect(self._open_add_dialog)
+        add_btn.clicked.connect(self._show_login)
         btn_row.addWidget(add_btn)
-        self.remove_playlist_btn = QPushButton("  Remove playlist")
-        self.remove_playlist_btn.setObjectName("dangerBtn")
-        self.remove_playlist_btn.setIcon(
+        self.remove_provider_btn = QPushButton("  Remove provider")
+        self.remove_provider_btn.setObjectName("dangerBtn")
+        self.remove_provider_btn.setIcon(
             make_icon("trash", 16, COLORS["red"]))
-        self.remove_playlist_btn.setCursor(Qt.PointingHandCursor)
-        self.remove_playlist_btn.clicked.connect(self._remove_playlist)
-        btn_row.addWidget(self.remove_playlist_btn)
+        self.remove_provider_btn.setCursor(Qt.PointingHandCursor)
+        self.remove_provider_btn.clicked.connect(self._remove_provider)
+        btn_row.addWidget(self.remove_provider_btn)
         btn_row.addStretch(1)
         lay.addLayout(btn_row)
-        lay.addStretch(1)
         return page
 
-    def _refresh_playlist_card(self) -> None:
-        lay = self.playlist_card.layout()
-        if lay is None:
-            lay = QVBoxLayout(self.playlist_card)
-            lay.setContentsMargins(20, 18, 20, 18)
-            lay.setSpacing(6)
-        self._clear_layout(lay)
-        name = QLabel(self._playlist_name())
-        name.setObjectName("sideTitle")
-        lay.addWidget(name)
-        src = QLabel(self.config.playlist_source or "No playlist configured")
-        src.setObjectName("cardMeta")
-        src.setWordWrap(True)
-        lay.addWidget(src)
-        n_live = sum(1 for c in self.channels if c.kind == "live")
-        n_mov = sum(1 for c in self.channels if c.kind == "movie")
-        n_ser = sum(1 for c in self.channels if c.kind == "series")
-        lay.addWidget(QLabel(
-            f"{len(self.channels)} channels  •  {n_live} live  •  "
-            f"{n_mov} movies  •  {n_ser} series"))
-        epg = QLabel(f"Guide: {self.config.epg_source or 'not configured'}")
-        epg.setObjectName("cardMeta")
-        epg.setWordWrap(True)
-        lay.addWidget(epg)
-        self.remove_playlist_btn.setVisible(bool(self.config.playlist_source))
+    def _refresh_providers_page(self) -> None:
+        self._clear_layout(self._providers_lay)
+        profiles = self.profiles.all()
+        active = self._profile
+        if active is not None:
+            card = QFrame()
+            card.setObjectName("sideCard")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(20, 18, 20, 18)
+            cl.setSpacing(6)
+            title_row = QHBoxLayout()
+            name = QLabel(active.name)
+            name.setObjectName("sideTitle")
+            title_row.addWidget(name)
+            title_row.addStretch(1)
+            badge = QLabel(
+                "Xtream Codes" if active.is_xtream() else "M3U Playlist")
+            badge.setObjectName("cardMeta")
+            title_row.addWidget(badge)
+            cl.addLayout(title_row)
+            src = QLabel(active.redacted())
+            src.setObjectName("cardMeta")
+            src.setWordWrap(True)
+            cl.addWidget(src)
+            if active.is_xtream():
+                exp = QLabel(f"Account expires: {self._provider_expiry_text()}")
+                exp.setObjectName("cardMeta")
+                cl.addWidget(exp)
+            n_live = sum(1 for c in self.channels if c.kind == "live")
+            n_mov = sum(1 for c in self.channels if c.kind == "movie")
+            n_ser = sum(1 for c in self.channels if c.kind == "series")
+            cl.addWidget(QLabel(
+                f"{len(self.channels)} channels  •  {n_live} live  •  "
+                f"{n_mov} movies  •  {n_ser} series"))
+            guide = QLabel(
+                f"Guide: {self._guide_source() or 'not configured'}")
+            guide.setObjectName("cardMeta")
+            guide.setWordWrap(True)
+            cl.addWidget(guide)
+            self._providers_lay.addWidget(card)
 
-    def _remove_playlist(self) -> None:
-        """Remove the configured playlist after confirmation."""
-        if not self.config.playlist_source:
-            return
-        name = self._playlist_name()
-        answer = QMessageBox.question(
-            self, "Remove playlist",
-            f"Remove the playlist \"{name}\"?\n\n"
-            "All channels, movies and series will be unloaded and "
-            "playback will stop. Your favorites are kept and will "
-            "reappear if you add the playlist again.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
-            return
-        self.player.stop()
-        self.channels = []
-        self.epg = EPGManager()
-        self._play_context = []
-        self._play_index = 0
-        self._current_channel = None
-        self.config.clear_playlist()
-        self.thumb_video.clear()
-        self.np_title.setText("Nothing playing")
-        self.np_meta.setText("")
-        self.pp_btn.setIcon(make_icon("play", 18))
-        self._update_now_next()
-        self._update_status()
-        self._update_bell()
-        self._refresh_grid()
-        self._refresh_home()
-        self._refresh_playlist_card()
+            others = [p for p in profiles if p.id != active.id]
+            if others:
+                sub = QLabel("Other providers")
+                sub.setObjectName("sideTitle")
+                self._providers_lay.addWidget(sub)
+                for p in others:
+                    row = QFrame()
+                    row.setObjectName("sideCard")
+                    hl = QHBoxLayout(row)
+                    hl.setContentsMargins(14, 10, 14, 10)
+                    lbl = QLabel(f"{p.name}")
+                    lbl.setObjectName("upTitle")
+                    hl.addWidget(lbl, 1)
+                    kind = QLabel(p.kind)
+                    kind.setObjectName("cardMeta")
+                    hl.addWidget(kind)
+                    switch = QPushButton("Switch")
+                    switch.setObjectName("outlineBtn")
+                    switch.setCursor(Qt.PointingHandCursor)
+                    switch.clicked.connect(
+                        partial(self._switch_profile_by_id, p.id))
+                    hl.addWidget(switch)
+                    self._providers_lay.addWidget(row)
+        else:
+            empty = EmptyState(
+                "signal", "No provider configured",
+                "Add an Xtream Codes login or an M3U playlist to start.",
+                "Add provider")
+            if empty.cta is not None:
+                empty.cta.clicked.connect(self._show_login)
+            self._providers_lay.addWidget(empty)
+        self._providers_lay.addStretch(1)
+        self.remove_provider_btn.setVisible(active is not None)
 
     # -- right panel ---------------------------------------------------------------
     def _build_right_panel(self) -> QWidget:
@@ -1029,8 +1739,12 @@ class MainWindow(QMainWindow):
         if self._panel_mode == "drawer":
             self._drawer.hide()
         self._fade_page_in(self._pages[key])
-        if key in ("live", "movie", "series"):
+        if key in ("live", "movie"):
             self._current_kind = key
+            self._refresh_grid()
+        elif key == "series":
+            self._current_kind = key
+            self._close_series_detail()
             self._refresh_grid()
         elif key == "favorites":
             self._current_kind = None
@@ -1042,7 +1756,7 @@ class MainWindow(QMainWindow):
         elif key == "history":
             self._refresh_history_page()
         elif key == "playlists":
-            self._refresh_playlist_card()
+            self._refresh_providers_page()
 
     def _fade_page_in(self, page: QWidget) -> None:
         """Subtle 180ms fade for page switches (skipped if reduced motion)."""
@@ -1073,8 +1787,59 @@ class MainWindow(QMainWindow):
         self._current_category = "" if text == "All categories" else text
         self._refresh_grid()
 
+    # -- profiles -----------------------------------------------------------
+    def _load_profile(self, profile: ProviderProfile) -> None:
+        if profile.is_xtream():
+            self._load_xtream(profile)
+        else:
+            if profile.playlist_url:
+                self._load_playlist(profile.playlist_url)
+            if profile.epg_url:
+                self._load_epg(profile.epg_url)
+
+    def _load_xtream(self, profile: ProviderProfile) -> None:
+        if self._xloader and self._xloader.isRunning():
+            return
+        self._show_loading_skeletons()
+        self._xloader = _XtreamLoader(profile)
+        self._xloader.finished_ok.connect(self._on_xtream_loaded)
+        self._xloader.failed.connect(self._on_xtream_failed)
+        self._xloader.start()
+
+    def _on_xtream_failed(self, msg: str) -> None:
+        QMessageBox.warning(
+            self, "Provider failed",
+            f"Could not load the Xtream provider:\n{msg}")
+
+    def _on_xtream_loaded(self, payload: dict) -> None:
+        self._xtream = payload["client"]
+        self._xtream_user = payload.get("user_info", {}) or {}
+        self._on_playlist_loaded(payload["channels"])
+        epg_url = payload.get("epg_url", "")
+        if epg_url:
+            self._load_epg(epg_url)
+        self._refresh_provider_btn()
+        if not self._xtream.is_active():
+            self._show_account_banner(
+                "Your provider account is inactive or expired — "
+                "streams may not play. Contact your provider.")
+        else:
+            self._hide_account_banner()
+
+    def _guide_source(self) -> str:
+        """XMLTV source for the active profile (auto for Xtream)."""
+        if self._profile is None:
+            return ""
+        if self._profile.is_xtream():
+            if self._xtream is not None:
+                return self._xtream.xmltv_url()
+            return ""
+        return self._profile.epg_url
+
     # -- playlist -------------------------------------------------------------
     def _playlist_name(self) -> str:
+        if self._profile is not None:
+            return self._profile.name
         src = self.config.playlist_source
         if not src:
             return "—"
@@ -1098,7 +1863,8 @@ class MainWindow(QMainWindow):
 
     def _open_connection(self) -> None:
         dlg = _ConnectionDialog(
-            self.config, {"channels": len(self.channels)}, self)
+            self._profile, {"channels": len(self.channels)},
+            self._provider_expiry_text(), self)
         dlg.exec()
 
     def _load_playlist(self, source: str, silent: bool = False) -> None:
@@ -1138,7 +1904,7 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._refresh_grid()
         self._refresh_home()
-        self._refresh_playlist_card()
+        self._refresh_providers_page()
         self._update_bell()
 
     # -- EPG ------------------------------------------------------------------
@@ -1146,7 +1912,10 @@ class MainWindow(QMainWindow):
         if not source:
             if not silent:
                 QMessageBox.information(
-                    self, "EPG", "Add an XMLTV guide URL first (Playlist manager).")
+                    self, "EPG",
+                    "No guide configured for this provider. "
+                    "Xtream providers load it automatically; for M3U, "
+                    "add an XMLTV URL when creating the provider.")
             return
         if self._epg_loader and self._epg_loader.isRunning():
             return
@@ -1190,8 +1959,8 @@ class MainWindow(QMainWindow):
                  if c.url == self.config.last_channel_url), None)
         if featured is None:
             live = self._live_channels()
-            featured = live[0] if live else (
-                self.channels[0] if self.channels else None)
+            featured = live[0] if live else next(
+                (c for c in self.channels if c.url), None)
         now = None
         if featured and self.epg.loaded:
             now, _ = self.epg.now_and_next(featured.tvg_id, featured.name)
@@ -1256,11 +2025,11 @@ class MainWindow(QMainWindow):
                 cta_slot=self.search.clear)
         elif not self.channels:
             empty = dict(
-                empty_title="No playlist yet",
-                empty_sub="Add an M3U playlist to start watching "
-                          "live TV, movies and series.",
-                cta_text="Add playlist",
-                cta_slot=self._open_add_dialog)
+                empty_title="No provider yet",
+                empty_sub="Add an Xtream Codes login or an M3U playlist "
+                          "to start watching live TV, movies and series.",
+                cta_text="Add provider",
+                cta_slot=self._show_login)
         else:
             empty = dict(
                 empty_title="Nothing here",
@@ -1272,7 +2041,27 @@ class MainWindow(QMainWindow):
             self._current_channel.url if self._current_channel else None)
 
     def _play_from(self, key: str, channel: Channel) -> None:
+        # movies open the details dialog; xtream series drill into seasons
+        if channel.kind == "movie":
+            self._open_movie_details(channel)
+            return
+        if (key == "series" and channel.kind == "series"
+                and channel.series_id and self._xtream is not None):
+            self._open_series_detail(channel)
+            return
         self.play_channel(channel, self._context_lists.get(key, [channel]))
+
+    def _open_movie_details(self, channel: Channel) -> None:
+        client = (self._xtream if self._profile is not None
+                  and self._profile.is_xtream() else None)
+        dlg = _MovieDetailsDialog(
+            channel, client,
+            self._profile.id if self._profile else "",
+            channel.url in self.favorites.all(), self)
+        dlg.play_requested.connect(
+            lambda ch: self.play_channel(ch, [ch]))
+        dlg.fav_changed.connect(self._on_fav_toggled)
+        dlg.exec()
 
     def _on_fav_toggled(self, channel: Channel, state: bool) -> None:
         self.favorites.toggle(channel.url)
@@ -1296,8 +2085,8 @@ class MainWindow(QMainWindow):
         if not self.epg.loaded:
             self._catchup_empty(
                 "tv", "No guide loaded",
-                "Add an XMLTV guide URL to see today's programmes.",
-                "Add guide", self._open_add_dialog)
+                "Load a guide to see today's programmes.",
+                "Load guide", lambda: self._load_epg(self._guide_source()))
             return
         live = self._live_channels()[:40]
         start_day = datetime.now(timezone.utc).replace(
@@ -1613,7 +2402,7 @@ class MainWindow(QMainWindow):
         n_mov = sum(1 for c in self.channels if c.kind == "movie")
         n_ser = sum(1 for c in self.channels if c.kind == "series")
         self.status_text.setText(
-            f"Playlist: {self._playlist_name()}    Channels: {len(self.channels)}"
+            f"Provider: {self._playlist_name()}    Channels: {len(self.channels)}"
             f"    Movies: {n_mov}    Series: {n_ser}")
         ok = len(self.channels) > 0
         self.conn_pill.set_connected(ok)
