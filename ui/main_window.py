@@ -7,11 +7,15 @@ from datetime import datetime, timezone
 from functools import partial
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Qt, QThread, Signal, QPoint
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QPoint, QTimer, QPropertyAnimation,
+    QAbstractAnimation,
+)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QStackedWidget, QLabel, QSlider, QComboBox, QMessageBox,
     QScrollArea, QDialog, QDialogButtonBox, QMenu, QFormLayout,
+    QLineEdit, QAbstractButton, QGraphicsOpacityEffect,
 )
 
 from app import __app_name__, __version__
@@ -24,11 +28,12 @@ from app.playlist import (
     load_playlist, categories, filter_channels,
 )
 from ui.dialogs import AddPlaylistDialog, SettingsDialog
-from ui.theme import COLORS
+from ui.theme import COLORS, animations_enabled
 from ui.widgets import (
     ChannelGrid, SearchBar, VideoWidget, NavButton, IconButton, WinButton,
     SectionHeader, StatPill, ChannelCard, PosterCard, HeroCard,
     LogoLabel, brand_pixmap, avatar_pixmap, make_icon, poster_pixmap,
+    ElidedLabel, EmptyState, SkeletonCard, Drawer,
 )
 
 
@@ -202,8 +207,19 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setWindowTitle(f"{__app_name__} — IPTV Player")
+
+        # responsive state (must exist before any resizeEvent can fire)
+        self._panel_mode: str = "docked"   # or "drawer"
+        self._sidebar_compact = False
+        self._search_narrow = False
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(120)
+        self._resize_timer.timeout.connect(self._apply_breakpoints)
+        self._page_anim = None
+
         self.resize(1440, 900)
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(720, 500)
 
         self.config = AppConfig()
         self.favorites = FavoritesStore()
@@ -258,12 +274,15 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_titlebar())
+        self._topbar = self._build_titlebar()
+        root.addWidget(self._topbar)
 
         mid = QHBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
-        mid.addWidget(self._build_sidebar())
+        self._mid_lay = mid
+        self._sidebar = self._build_sidebar()
+        mid.addWidget(self._sidebar)
 
         content = QVBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
@@ -284,6 +303,26 @@ class MainWindow(QMainWindow):
 
         self._nav_btns["home"].setChecked(True)
 
+        # overlay layer: right-panel drawer, floating buttons, search popup
+        self._drawer = Drawer(central, width=320)
+        self._fab = QPushButton()
+        self._fab.setObjectName("fabBtn")
+        self._fab.setIcon(make_icon("play", 20, "white"))
+        self._fab.setText("  Now Playing")
+        self._fab.setFixedSize(160, 56)
+        self._fab.setCursor(Qt.PointingHandCursor)
+        self._fab.setParent(central)
+        self._fab.clicked.connect(self._toggle_drawer)
+        self._fab.hide()
+
+        self._search_overlay = QFrame(central)
+        self._search_overlay.setObjectName("searchOverlay")
+        ov_lay = QVBoxLayout(self._search_overlay)
+        ov_lay.setContentsMargins(14, 12, 14, 12)
+        self._search_overlay.hide()
+
+        self._apply_breakpoints()
+
     def _build_titlebar(self) -> QWidget:
         bar = _TitleBar()
         bar.setFixedHeight(56)
@@ -299,6 +338,12 @@ class MainWindow(QMainWindow):
         self.search.setFixedWidth(420)
         self.search.textChanged.connect(self._on_search)
         lay.addWidget(self.search)
+        self._search_idx = lay.indexOf(self.search)
+        self._search_btn = IconButton("search", 20)
+        self._search_btn.setToolTip("Search")
+        self._search_btn.clicked.connect(self._toggle_search_overlay)
+        self._search_btn.hide()
+        lay.addWidget(self._search_btn)
         lay.addStretch(1)
 
         self.bell_btn = IconButton("bell", 20)
@@ -345,6 +390,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(mark)
         title = QLabel("NOVA IPTV")
         title.setObjectName("brandTitle")
+        self._brand_title = title
         brand.addWidget(title)
         brand.addStretch(1)
         lay.addLayout(brand)
@@ -358,14 +404,17 @@ class MainWindow(QMainWindow):
             self._nav_btns[key] = btn
         lay.addStretch(1)
 
+        self._side_action_btns: list[NavButton] = []
         mgr = NavButton("folder", "Playlist manager")
         mgr.setCheckable(False)
         mgr.clicked.connect(self._open_add_dialog)
         lay.addWidget(mgr)
+        self._side_action_btns.append(mgr)
         conn = NavButton("signal", "Connection")
         conn.setCheckable(False)
         conn.clicked.connect(self._open_connection)
         lay.addWidget(conn)
+        self._side_action_btns.append(conn)
         lay.addSpacing(8)
 
         div = QWidget()
@@ -380,12 +429,14 @@ class MainWindow(QMainWindow):
         user.addWidget(av)
         name = QLabel("Guest")
         name.setObjectName("userName")
+        self._user_name = name
         user.addWidget(name)
         user.addStretch(1)
         lay.addLayout(user)
         ver = QLabel(f"v{__version__}")
         ver.setObjectName("versionLabel")
         ver.setAlignment(Qt.AlignCenter)
+        self._ver_label = ver
         lay.addWidget(ver)
         return side
 
@@ -395,7 +446,7 @@ class MainWindow(QMainWindow):
         bar.setFixedHeight(30)
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
-        self.status_text = QLabel("Playlist: —")
+        self.status_text = ElidedLabel("Playlist: —")
         self.status_text.setObjectName("statusText")
         lay.addWidget(self.status_text)
         lay.addStretch(1)
@@ -406,6 +457,188 @@ class MainWindow(QMainWindow):
         self.stream_label.setObjectName("statusText")
         lay.addWidget(self.stream_label)
         return bar
+
+    # -- responsive -----------------------------------------------------------
+    # Breakpoints (window width):
+    #   >= 1280 : full sidebar + docked right panel
+    #   900-1279: 64px icon rail + right panel as overlay drawer (FAB toggle)
+    #   < 900   : icon rail + stacked hero + search collapses to overlay field
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._layout_overlays()
+        if not self._resize_timer.isActive():
+            self._resize_timer.start()
+
+    def _layout_overlays(self) -> None:
+        """Keep floating widgets positioned; called on every resize."""
+        central = self.centralWidget()
+        if central is None:
+            return
+        cw, ch = central.width(), central.height()
+        if hasattr(self, "_fab") and self._fab.isVisible():
+            self._fab.move(cw - 176, ch - 72)
+            self._fab.raise_()
+        if hasattr(self, "_drawer"):
+            self._drawer.layout_host()
+        if hasattr(self, "_search_overlay") and self._search_overlay.isVisible():
+            self._position_search_overlay()
+
+    def _apply_breakpoints(self) -> None:
+        w = self.width()
+        # sidebar: full labels vs icon rail
+        self._apply_sidebar_compact(w < 1280)
+        # right panel: docked vs drawer
+        mode = "docked" if w >= 1280 else "drawer"
+        if mode != self._panel_mode:
+            self._panel_mode = mode
+            self._apply_panel_mode()
+        else:
+            self._update_panel_visibility()
+        # search: inline vs overlay icon button
+        self._apply_search_mode(w < 900)
+        # grids: cap columns on small windows
+        for grid in self.grids.values():
+            grid.set_max_columns(2 if w < 900 else 6)
+        # hero orientation follows content width
+        if hasattr(self, "hero"):
+            self.hero.set_stacked(self.stack.width() < 1100)
+        # search field width for the middle breakpoint
+        if not self._search_narrow:
+            self.search.setFixedWidth(260 if w < 1280 else 420)
+        self._layout_overlays()
+
+    def _apply_sidebar_compact(self, compact: bool) -> None:
+        if compact == self._sidebar_compact:
+            return
+        self._sidebar_compact = compact
+        for btn in list(self._nav_btns.values()) + self._side_action_btns:
+            btn.set_compact(compact)
+        self._sidebar.setFixedWidth(64 if compact else 212)
+        lay = self._sidebar.layout()
+        if compact:
+            lay.setContentsMargins(9, 16, 9, 12)
+        else:
+            lay.setContentsMargins(14, 16, 14, 12)
+        self._brand_title.setVisible(not compact)
+        self._user_name.setVisible(not compact)
+        self._ver_label.setVisible(not compact)
+
+    # -- right panel: docked vs drawer --------------------------------------
+    def _apply_panel_mode(self) -> None:
+        if self._panel_mode == "drawer":
+            self._mid_lay.removeWidget(self.right_panel)
+            self._drawer.set_content(self.right_panel)
+            self._drawer.hide_now()
+        else:
+            taken = self._drawer.take_content()
+            if taken is not None:
+                self._mid_lay.addWidget(taken)
+            self._drawer.hide_now()
+        self._update_panel_visibility()
+
+    def _update_panel_visibility(self) -> None:
+        show = self._current_page in ("home", "live")
+        if self._panel_mode == "docked":
+            self.right_panel.setVisible(show)
+        elif not show:
+            self._drawer.hide()
+        self._update_fab_visibility()
+
+    def _update_fab_visibility(self) -> None:
+        show = (self._panel_mode == "drawer"
+                and self._current_page in ("home", "live"))
+        self._fab.setVisible(show)
+        if show:
+            self._layout_overlays()
+
+    def _toggle_drawer(self) -> None:
+        if self._drawer.is_open():
+            self._drawer.hide()
+        else:
+            self._drawer.show()
+
+    # -- search overlay (<900px) -------------------------------------------
+    def _apply_search_mode(self, narrow: bool) -> None:
+        if narrow == self._search_narrow:
+            return
+        self._search_narrow = narrow
+        if narrow:
+            self._topbar.layout().removeWidget(self.search)
+            self.search.hide()
+            self._search_btn.show()
+        else:
+            self._close_search_overlay()
+            self._topbar.layout().insertWidget(self._search_idx, self.search)
+            self.search.show()
+            self._search_btn.hide()
+
+    def _toggle_search_overlay(self) -> None:
+        if self._search_overlay.isVisible():
+            self._close_search_overlay()
+            return
+        ov_lay = self._search_overlay.layout()
+        if self.search.parent() is not self._search_overlay:
+            ov_lay.addWidget(self.search)
+        self.search.show()
+        self._position_search_overlay()
+        self._search_overlay.show()
+        self._search_overlay.raise_()
+        self.search.setFocus()
+
+    def _position_search_overlay(self) -> None:
+        bar = self._topbar
+        w = 340
+        x = max(8, bar.width() - w - 16)
+        self._search_overlay.setGeometry(x, bar.height() + 6, w, 66)
+
+    def _close_search_overlay(self) -> None:
+        self._search_overlay.hide()
+
+    # -- keyboard shortcuts ---------------------------------------------------
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        key = event.key()
+        if key == Qt.Key_Escape:
+            if self._drawer.is_open():
+                self._drawer.hide()
+                event.accept()
+                return
+            if self._search_overlay.isVisible():
+                self._close_search_overlay()
+                event.accept()
+                return
+            super().keyPressEvent(event)
+            return
+        focus = self.focusWidget()
+        if isinstance(focus, (QLineEdit, QComboBox, QSlider)):
+            super().keyPressEvent(event)
+            return
+        if isinstance(focus, QAbstractButton) and key == Qt.Key_Space:
+            super().keyPressEvent(event)  # let the button handle Space
+            return
+        handled = True
+        if key == Qt.Key_Space:
+            self._toggle_pause()
+        elif key == Qt.Key_F:
+            self._toggle_fullscreen()
+        elif key == Qt.Key_M:
+            self._toggle_mute()
+        elif key == Qt.Key_Left:
+            self._play_prev()
+        elif key == Qt.Key_Right:
+            self._play_next()
+        elif key == Qt.Key_Slash:
+            if self._search_narrow and not self._search_overlay.isVisible():
+                self._toggle_search_overlay()
+            else:
+                self.search.setFocus()
+                self.search.selectAll()
+        else:
+            handled = False
+        if handled:
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     # -- pages ------------------------------------------------------------------
     def _build_page(self, key: str) -> QWidget:
@@ -642,7 +875,7 @@ class MainWindow(QMainWindow):
         self.thumb_video = VideoWidget(placeholder="Select a channel to play")
         self.thumb_video.setFixedHeight(150)
         cl.addWidget(self.thumb_video)
-        self.np_title = QLabel("Nothing playing")
+        self.np_title = ElidedLabel("Nothing playing")
         self.np_title.setObjectName("cardName")
         self.np_title.setWordWrap(True)
         cl.addWidget(self.np_title)
@@ -742,7 +975,10 @@ class MainWindow(QMainWindow):
         idx = [k for k, _l, _i in NAV_ITEMS].index(key)
         self.stack.setCurrentIndex(idx)
         self._current_page = key
-        self.right_panel.setVisible(key in ("home", "live"))
+        self._update_panel_visibility()
+        if self._panel_mode == "drawer":
+            self._drawer.hide()
+        self._fade_page_in(self._pages[key])
         if key in ("live", "movie", "series"):
             self._current_kind = key
             self._refresh_grid()
@@ -757,6 +993,24 @@ class MainWindow(QMainWindow):
             self._refresh_history_page()
         elif key == "playlists":
             self._refresh_playlist_card()
+
+    def _fade_page_in(self, page: QWidget) -> None:
+        """Subtle 180ms fade for page switches (skipped if reduced motion)."""
+        if not animations_enabled():
+            return
+        try:
+            eff = QGraphicsOpacityEffect(page)
+            page.setGraphicsEffect(eff)
+            anim = QPropertyAnimation(eff, b"opacity", self)
+            anim.setDuration(180)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.finished.connect(
+                lambda: page.setGraphicsEffect(None))
+            self._page_anim = anim  # keep alive
+            anim.start(QAbstractAnimation.DeleteWhenStopped)
+        except Exception:
+            page.setGraphicsEffect(None)
 
     def _on_search(self, text: str) -> None:
         if self._current_page == "home" and text.strip():
@@ -800,6 +1054,7 @@ class MainWindow(QMainWindow):
     def _load_playlist(self, source: str, silent: bool = False) -> None:
         if self._loader and self._loader.isRunning():
             return
+        self._show_loading_skeletons()
         self._loader = _PlaylistLoader(source)
         self._loader.finished_ok.connect(self._on_playlist_loaded)
         self._loader.failed.connect(
@@ -807,6 +1062,17 @@ class MainWindow(QMainWindow):
                 self, "Playlist failed",
                 f"Could not load the playlist:\n{msg}"))
         self._loader.start()
+
+    def _show_loading_skeletons(self) -> None:
+        """Shimmer placeholders while the playlist loads."""
+        for grid in self.grids.values():
+            grid.show_skeletons(8)
+        if hasattr(self, "home_live_row"):
+            self._clear_layout(self.home_live_row)
+            for _ in range(6):
+                self.home_live_row.addWidget(
+                    SkeletonCard(animate=animations_enabled()))
+            self.home_live_row.addStretch(1)
 
     def _on_playlist_loaded(self, channels: list[Channel]) -> None:
         self.channels = channels
@@ -923,16 +1189,34 @@ class MainWindow(QMainWindow):
         if self._current_page not in ("live", "movie", "series", "favorites"):
             return
         key = self._current_page
-        if key == "favorites":
-            visible = self._visible_channels()
-            self._context_lists[key] = visible
-            self.grids[key].set_channels(
-                visible, self.favorites.all(), self._epg_label)
+        visible = self._visible_channels()
+        self._context_lists[key] = visible
+        query = self.search.text().strip()
+        if key == "favorites" and not visible and not query:
+            empty = dict(
+                empty_title="No favorites yet",
+                empty_sub="Tap the star on any channel to pin it here.",
+                cta_text="Browse Live TV",
+                cta_slot=partial(self._navigate, "live"))
+        elif query and not visible:
+            empty = dict(
+                empty_title=f"No results for '{query}'",
+                empty_sub="Try a different search term.",
+                cta_text="Clear search",
+                cta_slot=self.search.clear)
+        elif not self.channels:
+            empty = dict(
+                empty_title="No playlist yet",
+                empty_sub="Add an M3U playlist to start watching "
+                          "live TV, movies and series.",
+                cta_text="Add playlist",
+                cta_slot=self._open_add_dialog)
         else:
-            visible = self._visible_channels()
-            self._context_lists[key] = visible
-            self.grids[key].set_channels(
-                visible, self.favorites.all(), self._epg_label)
+            empty = dict(
+                empty_title="Nothing here",
+                empty_sub="No channels match the current filter.")
+        self.grids[key].set_channels(
+            visible, self.favorites.all(), self._epg_label, **empty)
         self._count_labels[key].setText(f"{len(self._context_lists[key])} items")
         self.grids[key].mark_selected(
             self._current_channel.url if self._current_channel else None)
@@ -949,16 +1233,21 @@ class MainWindow(QMainWindow):
         self._refresh_fav_mini()
 
     # -- catch-up -----------------------------------------------------------------
+    def _catchup_empty(self, icon: str, title: str, sub: str,
+                       cta_text: str = "", cta_slot=None) -> None:
+        empty = EmptyState(icon, title, sub, cta_text)
+        if empty.cta is not None and cta_slot is not None:
+            empty.cta.clicked.connect(cta_slot)
+        self.catchup_lay.addWidget(empty)
+        self.catchup_lay.addStretch(1)
+
     def _refresh_catchup(self) -> None:
         self._clear_layout(self.catchup_lay)
         if not self.epg.loaded:
-            lbl = QLabel(
-                "Load an XMLTV guide to see today's programmes.\n"
-                "Add the guide URL via Playlist manager.")
-            lbl.setObjectName("cardMeta")
-            lbl.setAlignment(Qt.AlignCenter)
-            self.catchup_lay.addWidget(lbl)
-            self.catchup_lay.addStretch(1)
+            self._catchup_empty(
+                "tv", "No guide loaded",
+                "Add an XMLTV guide URL to see today's programmes.",
+                "Add guide", self._open_add_dialog)
             return
         live = self._live_channels()[:40]
         start_day = datetime.now(timezone.utc).replace(
@@ -970,11 +1259,9 @@ class MainWindow(QMainWindow):
                 items.append((pr.start, pr, ch))
         items.sort(key=lambda t: t[0])
         if not items:
-            lbl = QLabel("No programmes found for today.")
-            lbl.setObjectName("cardMeta")
-            lbl.setAlignment(Qt.AlignCenter)
-            self.catchup_lay.addWidget(lbl)
-            self.catchup_lay.addStretch(1)
+            self._catchup_empty(
+                "search", "No programmes found",
+                "No programmes found for today in the loaded guide.")
             return
         for _start, pr, ch in items[:80]:
             row = QFrame()
@@ -1008,10 +1295,13 @@ class MainWindow(QMainWindow):
     def _refresh_history_page(self) -> None:
         self._clear_layout(self.history_lay)
         if not self.history:
-            lbl = QLabel("Nothing watched yet. Play a channel to see it here.")
-            lbl.setObjectName("cardMeta")
-            lbl.setAlignment(Qt.AlignCenter)
-            self.history_lay.addWidget(lbl)
+            empty = EmptyState(
+                "history", "Nothing watched yet",
+                "Play a channel and it will show up here.",
+                "Browse Live TV")
+            if empty.cta is not None:
+                empty.cta.clicked.connect(partial(self._navigate, "live"))
+            self.history_lay.addWidget(empty)
             self.history_lay.addStretch(1)
             return
         for name, url, played_at in self.history:

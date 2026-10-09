@@ -469,6 +469,72 @@ QMenu::item:selected {{
 QCheckBox {{
     spacing: 8px;
 }}
+
+/* ================= responsive / overlay ================= */
+QWidget#scrim {{
+    background: rgba(4, 6, 10, 150);
+}}
+QWidget#drawerPanel {{
+    background: {c["surface"]};
+    border-left: 1px solid {c["border"]};
+}}
+QPushButton#fabBtn {{
+    background: {GRADIENT};
+    color: white;
+    border: none;
+    border-radius: 28px;
+    font-weight: 700;
+}}
+QPushButton#fabBtn:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #9d71f7, stop:1 #7c3aed);
+}}
+QPushButton#fabBtn:pressed {{
+    background: {c["accent2"]};
+}}
+QFrame#skeletonCard {{
+    background: {c["card"]};
+    border: 1px solid {c["border"]};
+    border-radius: 14px;
+}}
+QLabel#emptyTitle {{
+    font-size: 14pt;
+    font-weight: 700;
+}}
+QLabel#emptySub {{
+    font-size: 10pt;
+    color: {c["muted"]};
+}}
+QFrame#searchOverlay {{
+    background: {c["card"]};
+    border: 1px solid {c["accent"]};
+    border-radius: 14px;
+}}
+QFrame#emptyWrap {{
+    background: transparent;
+    border: 1px dashed {c["border"]};
+    border-radius: 14px;
+}}
+
+/* ================= states ================= */
+QPushButton#primaryBtn:pressed {{
+    background: {c["accent2"]};
+}}
+QPushButton#outlineBtn:pressed {{
+    background: {c["surface2"]};
+}}
+QPushButton#iconBtn:pressed {{
+    background: {c["surface"]};
+}}
+QPushButton#navBtn:pressed {{
+    background: {c["surface"]};
+}}
+QPushButton#navBtn:focus {{
+    border: 1px solid rgba(139, 92, 246, 120);
+}}
+QPushButton#transportBtn:pressed {{
+    background: {c["surface"]};
+}}
 """
 
 
@@ -477,3 +543,33 @@ def apply_theme(app) -> None:
     font = QFont("Segoe UI", 10)
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
+
+
+# -- UI-only preferences (kept out of app/ so the UI layer owns them) ----------
+
+class UiPrefs:
+    """Tiny QSettings wrapper for presentation prefs (same store as AppConfig)."""
+
+    def __init__(self) -> None:
+        from PySide6.QtCore import QSettings
+        from app import __app_name__
+        self._s = QSettings(__app_name__, __app_name__)
+
+    @property
+    def reduce_animations(self) -> bool:
+        return self._s.value("ui/reduce_animations", False, type=bool)
+
+    @reduce_animations.setter
+    def reduce_animations(self, value: bool) -> None:
+        self._s.setValue("ui/reduce_animations", bool(value))
+
+    def sync(self) -> None:
+        self._s.sync()
+
+
+def animations_enabled() -> bool:
+    """False when the user asked for reduced motion."""
+    try:
+        return not UiPrefs().reduce_animations
+    except Exception:
+        return True

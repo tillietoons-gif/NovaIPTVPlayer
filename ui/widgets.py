@@ -11,11 +11,12 @@ import math
 import requests
 from PySide6.QtCore import (
     Qt, Signal, Slot, QRunnable, QThreadPool, QObject,
-    QPointF, QRectF, QSize,
+    QPoint, QPointF, QRectF, QSize, QTimer, QPropertyAnimation,
+    QEasingCurve,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QColor, QIcon, QPen, QLinearGradient,
-    QFont, QPainterPath,
+    QFont, QFontMetrics, QPainterPath,
 )
 from PySide6.QtWidgets import (
     QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models import Channel, EPGProgram
-from ui.theme import COLORS
+from ui.theme import COLORS, animations_enabled
 
 
 # -- drawn icons ---------------------------------------------------------------
@@ -364,10 +365,28 @@ class NavButton(QPushButton):
         super().__init__(parent)
         self.setObjectName("navBtn")
         self.setCheckable(True)
+        self._icon_name = icon_name
+        self._label = text
+        self._compact = False
         self.setIcon(make_icon(icon_name, 20))
         self.setIconSize(QSize(20, 20))
         self.setText(f"  {text}")
         self.setCursor(Qt.PointingHandCursor)
+
+    def set_compact(self, compact: bool) -> None:
+        """Icon-rail mode: hide the text label, keep icon + tooltip."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        if compact:
+            self.setText("")
+            self.setToolTip(self._label)
+            self.setFixedWidth(46)
+        else:
+            self.setText(f"  {self._label}")
+            self.setToolTip("")
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
 
 
 class IconButton(QPushButton):
@@ -447,6 +466,236 @@ class SearchBar(QLineEdit):
         self.setObjectName("searchBar")
         self.setPlaceholderText("Search channels, movies, series...")
         self.setClearButtonEnabled(True)
+
+
+class ElidedLabel(QLabel):
+    """QLabel that truncates long text with an ellipsis on resize."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = text or ""
+        super().setText(self._elided())
+
+    def fullText(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        super().setText(self._elided())
+
+    def _elided(self) -> str:
+        fm = QFontMetrics(self.font())
+        return fm.elidedText(self._full, Qt.ElideRight, max(20, self.width() - 6))
+
+
+class SkeletonCard(QFrame):
+    """Shimmer-style loading placeholder.
+
+    Cheap opacity pulse driven by a QTimer (no heavy graphics effects);
+    static when animations are reduced.
+    """
+
+    def __init__(self, width: int = 172, height: int = 200,
+                 parent=None, animate: bool = True) -> None:
+        super().__init__(parent)
+        self.setObjectName("skeletonCard")
+        self.setFixedSize(width, height)
+        self._phase = 0
+        self._timer = None
+        if animate:
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._pulse)
+            self._timer.start(650)
+
+    def _pulse(self) -> None:
+        self._phase ^= 1
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        base = QColor(COLORS["card"])
+        lite = QColor("#2b3242")
+        c = lite if self._phase else base
+        p.setBrush(c)
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
+        inner = QColor("#313847") if self._phase else QColor("#262c3b")
+        p.setBrush(inner)
+        w = self.width()
+        p.drawRoundedRect(14, 14, w - 28, 84, 8, 8)
+        p.drawRoundedRect(14, 110, w - 28, 13, 6, 6)
+        p.drawRoundedRect(14, 131, (w - 28) * 2 // 3, 11, 5, 5)
+
+
+class EmptyState(QWidget):
+    """Friendly empty state: drawn icon, title, subtitle, optional CTA."""
+
+    def __init__(self, icon_name: str = "tv", title: str = "",
+                 subtitle: str = "", cta_text: str = "",
+                 parent=None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignCenter)
+        lay.setContentsMargins(24, 32, 24, 32)
+
+        wrap = QFrame()
+        wrap.setObjectName("emptyWrap")
+        wl = QVBoxLayout(wrap)
+        wl.setAlignment(Qt.AlignCenter)
+        wl.setSpacing(8)
+        wl.setContentsMargins(36, 36, 36, 36)
+
+        ic = QLabel()
+        ic.setPixmap(make_icon(icon_name, 46, COLORS["muted"]).pixmap(46, 46))
+        ic.setAlignment(Qt.AlignCenter)
+        wl.addWidget(ic)
+
+        t = QLabel(title)
+        t.setObjectName("emptyTitle")
+        t.setAlignment(Qt.AlignCenter)
+        t.setWordWrap(True)
+        wl.addWidget(t)
+
+        s = QLabel(subtitle)
+        s.setObjectName("emptySub")
+        s.setAlignment(Qt.AlignCenter)
+        s.setWordWrap(True)
+        wl.addWidget(s)
+
+        self.cta: QPushButton | None = None
+        if cta_text:
+            self.cta = QPushButton(cta_text)
+            self.cta.setObjectName("primaryBtn")
+            self.cta.setCursor(Qt.PointingHandCursor)
+            wl.addWidget(self.cta, alignment=Qt.AlignCenter)
+
+        lay.addWidget(wrap, alignment=Qt.AlignCenter)
+
+
+class _Scrim(QWidget):
+    """Dimmed backdrop that closes the drawer on click."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class Drawer(QObject):
+    """Right-side overlay drawer with dimmed backdrop.
+
+    Content widget is supplied by the caller (reparented in/out).
+    Slide animation honors the reduce-animations preference.
+    """
+
+    def __init__(self, host: QWidget, width: int = 320) -> None:
+        super().__init__(host)
+        self._animations_enabled = animations_enabled
+        self._host = host
+        self._width = width
+        self._open = False
+
+        self._scrim = _Scrim(host)
+        self._scrim.setObjectName("scrim")
+        self._scrim.hide()
+        self._scrim.clicked.connect(self.hide)
+
+        self.panel = QWidget(host)
+        self.panel.setObjectName("drawerPanel")
+        self.panel.hide()
+        self._lay = QVBoxLayout(self.panel)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(0)
+
+        self._anim = QPropertyAnimation(self.panel, b"pos", self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # -- content ------------------------------------------------------------
+    def set_content(self, widget: QWidget) -> None:
+        while self._lay.count():
+            self._lay.takeAt(0)
+        self._lay.addWidget(widget)
+        widget.show()
+
+    def take_content(self) -> QWidget | None:
+        item = self._lay.takeAt(0)
+        w = item.widget() if item else None
+        return w
+
+    # -- geometry -----------------------------------------------------------
+    def layout_host(self) -> None:
+        r = self._host.rect()
+        self._scrim.setGeometry(r)
+        x = r.width() - self._width if self._open else r.width() + 1
+        self.panel.setGeometry(x, 0, self._width, r.height())
+
+    # -- show / hide --------------------------------------------------------
+    def is_open(self) -> bool:
+        return self._open
+
+    def show(self) -> None:
+        r = self._host.rect()
+        self._scrim.setGeometry(r)
+        self._scrim.show()
+        self._scrim.raise_()
+        # start just off-screen right, then slide in
+        self.panel.setGeometry(r.width() + 1, 0, self._width, r.height())
+        self.panel.show()
+        self.panel.raise_()
+        self._open = True
+        if not self._animations_enabled():
+            self.panel.move(r.width() - self._width, 0)
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self.panel.pos())
+        self._anim.setEndValue(QPoint(
+            r.width() - self._width, 0))
+        self._anim.start()
+
+    def hide(self) -> None:
+        if not self._open and not self.panel.isVisible():
+            return
+        self._open = False
+        if not self._animations_enabled():
+            self.panel.hide()
+            self._scrim.hide()
+            return
+        self._anim.stop()
+        try:
+            self._anim.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._anim.finished.connect(self._on_hide_finished)
+        self._anim.setStartValue(self.panel.pos())
+        self._anim.setEndValue(QPoint(self._host.width() + 1, 0))
+        self._anim.start()
+
+    def hide_now(self) -> None:
+        """Instantly close without animation (mode switches)."""
+        self._open = False
+        try:
+            self._anim.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._anim.stop()
+        self.panel.hide()
+        self._scrim.hide()
+
+    def _on_hide_finished(self) -> None:
+        try:
+            self._anim.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.panel.hide()
+        self._scrim.hide()
 
 
 # -- video display ---------------------------------------------------------------
@@ -592,15 +841,30 @@ class ChannelCard(QFrame):
 
 
 class ChannelGrid(QWidget):
-    """Scrollable responsive grid of ChannelCards."""
+    """Scrollable grid of ChannelCards with responsive column count.
+
+    Columns are recomputed from the available viewport width
+    (target card min-width ~170px, clamped to 2..6) on resize.
+    Re-layout preserves scroll position and card selection.
+    """
 
     channel_chosen = Signal(object)
     fav_toggled = Signal(object, bool)
 
+    CARD_MIN_WIDTH = 170
+    CARD_SPACING = 12
+    MIN_COLUMNS = 2
+    MAX_COLUMNS = 6
+
     def __init__(self, parent=None, columns: int = 4) -> None:
         super().__init__(parent)
         self._columns = columns
+        self._max_columns = self.MAX_COLUMNS
         self._cards: list[ChannelCard] = []
+        self._selected_url: str | None = None
+        self._skeletons: list[SkeletonCard] = []
+        self._empty_state: EmptyState | None = None
+        self._rl_timer: QTimer | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -611,28 +875,97 @@ class ChannelGrid(QWidget):
 
         self._inner = QWidget()
         self._grid = QGridLayout(self._inner)
-        self._grid.setSpacing(12)
+        self._grid.setSpacing(self.CARD_SPACING)
         self._grid.setContentsMargins(4, 4, 4, 4)
         self.scroll.setWidget(self._inner)
 
-        self._empty = QLabel("No channels. Load a playlist to get started.")
-        self._empty.setAlignment(Qt.AlignCenter)
-        self._empty.setStyleSheet(
-            f"color:{COLORS['muted']}; font-size:14px; padding:40px;")
+    # -- responsive columns -------------------------------------------------
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._rl_timer is None:
+            self._rl_timer = QTimer(self)
+            self._rl_timer.setSingleShot(True)
+            self._rl_timer.setInterval(90)
+            self._rl_timer.timeout.connect(self._relayout)
+        self._rl_timer.start()
 
-    def set_channels(self, channels: list[Channel],
-                     favorites: set[str],
-                     epg_lookup=None) -> None:
+    def _columns_for_width(self, width: int) -> int:
+        if width <= 0:
+            return self._columns
+        cols = width // (self.CARD_MIN_WIDTH + self.CARD_SPACING)
+        cols = max(self.MIN_COLUMNS, min(self.MAX_COLUMNS, cols))
+        return min(cols, self._max_columns)
+
+    def set_max_columns(self, n: int) -> None:
+        """Cap the column count (used by the <900px breakpoint)."""
+        n = max(self.MIN_COLUMNS, min(self.MAX_COLUMNS, n))
+        if n != self._max_columns:
+            self._max_columns = n
+            self._relayout()
+
+    def _relayout(self) -> None:
+        cols = self._columns_for_width(self.scroll.viewport().width())
+        if cols == self._columns:
+            return
+        bar = self.scroll.verticalScrollBar()
+        pos = bar.value()
+        old = self._columns
+        self._grid.setColumnStretch(old, 0)
+        for card in self._cards:
+            self._grid.removeWidget(card)
+        self._columns = cols
+        for i, card in enumerate(self._cards):
+            self._grid.addWidget(card, i // cols, i % cols)
+        self._grid.setColumnStretch(cols, 1)
+        # restore scroll once the layout settles, keep selection
+        QTimer.singleShot(0, lambda: bar.setValue(min(pos, bar.maximum())))
+        self.mark_selected(self._selected_url)
+
+    # -- content ------------------------------------------------------------
+    def _take_all(self) -> None:
         for card in self._cards:
             self._grid.removeWidget(card)
             card.deleteLater()
         self._cards.clear()
+        for sk in self._skeletons:
+            self._grid.removeWidget(sk)
+            sk.deleteLater()
+        self._skeletons.clear()
+        if self._empty_state is not None:
+            self._grid.removeWidget(self._empty_state)
+            self._empty_state.deleteLater()
+            self._empty_state = None
+
+    def show_skeletons(self, count: int = 8) -> None:
+        """Show shimmer placeholders while content loads."""
+        self._take_all()
+        cols = self._columns_for_width(self.scroll.viewport().width())
+        self._columns = cols
+        for i in range(count):
+            sk = SkeletonCard(animate=animations_enabled())
+            self._grid.addWidget(sk, i // cols, i % cols)
+            self._skeletons.append(sk)
+        self._grid.setColumnStretch(cols, 1)
+
+    def set_channels(self, channels: list[Channel],
+                     favorites: set[str],
+                     epg_lookup=None, *,
+                     empty_title: str = "No channels",
+                     empty_sub: str = "Load a playlist to get started.",
+                     cta_text: str = "",
+                     cta_slot=None) -> None:
+        self._take_all()
 
         if not channels:
-            self._grid.addWidget(self._empty, 0, 0)
+            self._empty_state = EmptyState(
+                "tv", empty_title, empty_sub, cta_text)
+            if cta_text and cta_slot and self._empty_state.cta:
+                self._empty_state.cta.clicked.connect(cta_slot)
+            self._grid.addWidget(self._empty_state, 0, 0, 1, self._columns)
             return
-        self._empty.setParent(None)
 
+        cols = self._columns_for_width(self.scroll.viewport().width())
+        self._columns = cols
         for i, ch in enumerate(channels):
             epg_text = ""
             if epg_lookup is not None:
@@ -644,10 +977,11 @@ class ChannelGrid(QWidget):
             card.clicked.connect(self.channel_chosen.emit)
             card.fav_toggled.connect(self.fav_toggled.emit)
             card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            self._grid.addWidget(card, i // self._columns, i % self._columns)
+            self._grid.addWidget(card, i // cols, i % cols)
             self._cards.append(card)
         # keep the last row left-aligned
-        self._grid.setColumnStretch(self._columns, 1)
+        self._grid.setColumnStretch(cols, 1)
+        self.mark_selected(self._selected_url)
 
     def update_favorite(self, channel_url: str, fav: bool) -> None:
         for card in self._cards:
@@ -655,6 +989,7 @@ class ChannelGrid(QWidget):
                 card.set_favorite(fav)
 
     def mark_selected(self, channel_url: str | None) -> None:
+        self._selected_url = channel_url
         for card in self._cards:
             card.set_selected(card.channel.url == channel_url)
 
@@ -722,12 +1057,19 @@ class HeroCard(QFrame):
         self.setObjectName("heroCard")
         self.setMinimumHeight(230)
         self._channel: Channel | None = None
+        self._stacked = False
 
-        lay = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._body = QWidget()
+        outer.addWidget(self._body)
+
+        lay = QHBoxLayout(self._body)
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(24)
-
-        left = QVBoxLayout()
+        self._left = QWidget()
+        left = QVBoxLayout(self._left)
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(8)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -767,12 +1109,38 @@ class HeroCard(QFrame):
         btn_row.addWidget(self.details_btn)
         btn_row.addStretch(1)
         left.addLayout(btn_row)
-        lay.addLayout(left, 1)
+        lay.addWidget(self._left, 1)
 
         self.art = QLabel()
         self.art.setFixedSize(320, 190)
         self.art.setPixmap(poster_pixmap(320, 190, "", "hero-empty"))
+        self._body_layout = lay
         lay.addWidget(self.art)
+
+    def set_stacked(self, stacked: bool) -> None:
+        """Stack text above art on narrow content (<1100px)."""
+        if stacked == self._stacked:
+            return
+        self._stacked = stacked
+        lay = self._body_layout
+        # detach children
+        lay.removeWidget(self._left)
+        lay.removeWidget(self.art)
+        # swap orientation by rebuilding the body layout
+        old = self._body.layout()
+        QWidget().setLayout(old)  # orphan old layout
+        if stacked:
+            new_lay = QVBoxLayout(self._body)
+        else:
+            new_lay = QHBoxLayout(self._body)
+        new_lay.setContentsMargins(28, 24, 28, 24)
+        new_lay.setSpacing(16 if stacked else 24)
+        new_lay.addWidget(self._left, 1 if not stacked else 0)
+        if stacked:
+            new_lay.addWidget(self.art, 0, Qt.AlignHCenter)
+        else:
+            new_lay.addWidget(self.art)
+        self._body_layout = new_lay
 
     def set_feature(self, channel: Channel | None,
                     now: EPGProgram | None = None) -> None:

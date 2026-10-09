@@ -35,6 +35,7 @@ def main() -> int:
     apply_theme(app)
 
     win = MainWindow()
+    win.setMinimumSize(720, 500)
     win.show()
     return app.exec()
 

@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QCheckBox,
 )
 
+from ui.theme import UiPrefs
+
 
 class AddPlaylistDialog(QDialog):
     """Collect an M3U source (URL or file) plus an optional XMLTV source."""
@@ -74,9 +76,19 @@ class AddPlaylistDialog(QDialog):
 class SettingsDialog(QDialog):
     """Playback / UI preferences."""
 
+    SHORTCUTS = [
+        ("Space", "Play / pause"),
+        ("F", "Fullscreen"),
+        ("M", "Mute / unmute"),
+        ("Left / Right", "Previous / next channel"),
+        ("/", "Focus search"),
+        ("Esc", "Close panel or dialog"),
+    ]
+
     def __init__(self, config, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._prefs = UiPrefs()
         self.setWindowTitle("Settings")
         self.setMinimumWidth(380)
 
@@ -92,7 +104,28 @@ class SettingsDialog(QDialog):
         self.mute_check.setChecked(config.muted)
         form.addRow(self.mute_check)
 
+        self.anim_check = QCheckBox("Reduce animations")
+        self.anim_check.setChecked(self._prefs.reduce_animations)
+        self.anim_check.setToolTip(
+            "Disable page transitions, drawer slides and shimmer effects.")
+        form.addRow(self.anim_check)
+
         lay.addLayout(form)
+
+        sc_title = QLabel("Keyboard shortcuts")
+        sc_title.setStyleSheet("font-weight:700; margin-top:6px;")
+        lay.addWidget(sc_title)
+        sc_form = QFormLayout()
+        sc_form.setSpacing(4)
+        for keys, desc in self.SHORTCUTS:
+            k = QLabel(keys)
+            k.setStyleSheet(
+                "background:#1a1f2b; border:1px solid #232b3d; "
+                "border-radius:6px; padding:3px 10px; font-weight:600;")
+            d = QLabel(desc)
+            d.setStyleSheet("color:#8b91a7;")
+            sc_form.addRow(k, d)
+        lay.addLayout(sc_form)
 
         note = QLabel(
             "Tip: playback uses the built-in engine (bundled FFmpeg via PyAV)\n"
@@ -111,4 +144,6 @@ class SettingsDialog(QDialog):
         self._config.volume = self.volume_spin.value()
         self._config.muted = self.mute_check.isChecked()
         self._config.sync()
+        self._prefs.reduce_animations = self.anim_check.isChecked()
+        self._prefs.sync()
         self.accept()
