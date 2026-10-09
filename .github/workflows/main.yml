@@ -1,0 +1,78 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create GitHub Releases on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 (x64)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - name: Install VLC 64-bit (for libvlc)
+        run: choco install vlc -y --no-progress
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build EXE with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed `
+            --name NovaIPTVPlayer `
+            --collect-all PySide6 `
+            main.py
+
+          # Bundle VLC runtime (python-vlc loads libvlc at runtime)
+          $vlc = "C:\Program Files\VideoLAN\VLC"
+          $dest = "dist\NovaIPTVPlayer"
+          Copy-Item "$vlc\libvlc.dll" $dest
+          Copy-Item "$vlc\libvlccore.dll" $dest
+          Copy-Item "$vlc\plugins" "$dest\plugins" -Recurse
+
+      - name: Zip portable app
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\NovaIPTVPlayer\* `
+            -DestinationPath NovaIPTVPlayer-windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovaIPTVPlayer-windows
+          path: NovaIPTVPlayer-windows.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: NovaIPTVPlayer-windows
+          path: ./dist-zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dist-zip/NovaIPTVPlayer-windows.zip
+          generate_release_notes: true
