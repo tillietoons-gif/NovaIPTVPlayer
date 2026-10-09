@@ -223,6 +223,7 @@ class _DecodeWorker(QThread):
 
         t0: float | None = None       # wall clock anchored to pts_origin
         pts_origin: float | None = None
+        stream_pts_start: float | None = None
         position_s = 0.0
         got_first = False
         last_report = 0.0
@@ -263,6 +264,7 @@ class _DecodeWorker(QThread):
                     container.seek(int(ms * 1000))  # AV_TIME_BASE = µs
                     t0, pts_origin = None, None     # re-anchor on next frame
                     self._last_shown_pts = None     # forget presented history
+                    position_s = ms / 1000.0
                     if sink is not None:
                         sink.reset()
                     # A seek would corrupt the recording's timeline: finalize
@@ -299,7 +301,16 @@ class _DecodeWorker(QThread):
                 pts = _pts_seconds(frame)
                 if pts is None:
                     continue
-                if pts_origin is None:  # anchor the clock on the first frame
+                if stream_pts_start is None:
+                    stream_pts_start = pts
+
+                # Discontinuity detection (PTS reset, jump or HLS cut): re-anchor clock
+                if (self._last_shown_pts is not None
+                        and abs(pts - self._last_shown_pts) > 1.5):
+                    pts_origin = pts
+                    t0 = time.monotonic()
+                    self._last_shown_pts = None
+                elif pts_origin is None:  # anchor the clock on the first frame
                     pts_origin = pts
                     t0 = time.monotonic()
                 if not got_first:
@@ -321,7 +332,10 @@ class _DecodeWorker(QThread):
                 now = time.monotonic()
                 if now - last_report >= 1.0 and pts_origin is not None:
                     last_report = now
-                    pos_ms = max(0, int((position_s - pts_origin) * 1000))
+                    if stream_pts_start is not None and duration_ms > 0:
+                        pos_ms = max(0, int((position_s - stream_pts_start) * 1000))
+                    else:
+                        pos_ms = max(0, int((position_s - pts_origin) * 1000))
                     self.position_changed.emit(pos_ms, duration_ms)
 
         # Natural end of stream (or stop): release the audio device.
@@ -425,14 +439,14 @@ class _DecodeWorker(QThread):
         if self._stop_event.is_set() or self._seek_ms is not None:
             return False
         try:
-            arr = frame.to_ndarray(format="rgb24")
+            rgb = frame.reformat(format="rgb24") if frame.format.name != "rgb24" else frame
+            plane = rgb.planes[0]
+            # QImage wraps the buffer WITHOUT copying; .copy() detaches it
+            # so the decoder can safely reuse the buffer for the next frame.
+            img = QImage(memoryview(plane), rgb.width, rgb.height,
+                         plane.line_size, QImage.Format_RGB888).copy()
         except Exception:
             return False
-        h, w = int(arr.shape[0]), int(arr.shape[1])
-        # QImage wraps the numpy buffer WITHOUT copying; .copy() detaches it
-        # so the decoder can safely reuse the buffer for the next frame.
-        img = QImage(arr.data, w, h, 3 * w,
-                     QImage.Format_RGB888).copy()
         if img.isNull():
             return False
         self.frame_ready.emit(img)
@@ -443,7 +457,7 @@ class _DecodeWorker(QThread):
         """Resample to s16/stereo/44.1k and push PCM in ~8 KB chunks."""
         try:
             for af in resampler.resample(frame):
-                data = bytes(af.to_ndarray())
+                data = bytes(af.planes[0])
                 off = 0
                 while off < len(data):
                     if self._stop_event.is_set():
@@ -478,6 +492,7 @@ class Player(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._worker: _DecodeWorker | None = None
+        self._worker_connections: list = []
         self._zombies: list[_DecodeWorker] = []  # stuck workers dying on their own
         self._widget = None           # target VideoWidget (no native handles)
         self._volume = 80
@@ -518,15 +533,17 @@ class Player(QObject):
         self._worker = _DecodeWorker(
             url, self._volume, self._muted, dict(headers or {}))
         # Signal-to-signal chaining is thread-safe: Qt queues the hop.
-        self._worker.frame_ready.connect(self.frame_ready.emit)
-        self._worker.state_changed.connect(self.state_changed.emit)
-        self._worker.state_changed.connect(self._capture_worker_error)
-        self._worker.position_changed.connect(self.position_changed.emit)
-        self._worker.position_changed.connect(self._track_position)
-        self._worker.recording_started.connect(self.recording_started.emit)
-        self._worker.recording_stopped.connect(self.recording_stopped.emit)
-        self._worker.recording_error.connect(self.recording_error.emit)
-        self._worker.ended.connect(self.playback_finished.emit)
+        self._worker_connections = [
+            self._worker.frame_ready.connect(self.frame_ready.emit),
+            self._worker.state_changed.connect(self.state_changed.emit),
+            self._worker.state_changed.connect(self._capture_worker_error),
+            self._worker.position_changed.connect(self.position_changed.emit),
+            self._worker.position_changed.connect(self._track_position),
+            self._worker.recording_started.connect(self.recording_started.emit),
+            self._worker.recording_stopped.connect(self.recording_stopped.emit),
+            self._worker.recording_error.connect(self.recording_error.emit),
+            self._worker.ended.connect(self.playback_finished.emit),
+        ]
         self._worker.start()
 
     def _track_position(self, pos_ms: int, dur_ms: int) -> None:
@@ -547,6 +564,12 @@ class Player(QObject):
 
     def stop(self) -> None:
         self.stop_recording()  # finalize any recording first
+        for conn in getattr(self, "_worker_connections", []):
+            try:
+                QObject.disconnect(conn)
+            except (RuntimeError, TypeError):
+                pass
+        self._worker_connections = []
         worker, self._worker = self._worker, None
         if worker is not None:
             worker.request_stop()

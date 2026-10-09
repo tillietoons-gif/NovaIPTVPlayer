@@ -26,6 +26,7 @@ from app import __app_name__, __version__
 from app.config import AppConfig
 from app.epg import EPGManager
 from app.favorites import FavoritesStore
+from app.history import HistoryStore
 from app.models import (
     Channel, EPGProgram, xtream_live_to_channels, xtream_vod_to_channels,
     xtream_vod_detail_to_channel, xtream_series_to_channels,
@@ -534,7 +535,7 @@ class MainWindow(QMainWindow):
         self._series_loader: _SeriesInfoLoader | None = None
 
         self.channels: list[Channel] = []
-        self.history: list[tuple[str, str, str]] = []  # (name, url, played_at)
+        self.history = HistoryStore()
         self._progress: dict[str, tuple[int, int]] = {}  # url -> (pos_ms, dur_ms)
         self._current_page = "home"
         self._current_kind: str | None = "live"
@@ -1259,6 +1260,8 @@ class MainWindow(QMainWindow):
             self.play_channel(
                 channel, self._context_lists.get("series", [channel]))
             return
+        if self._current_page != "series":
+            self._navigate("series")
         self._series_detail_id = channel.series_id
         self.series_title.setText(channel.name)
         self.series_cover.load(channel.logo)
@@ -1799,6 +1802,11 @@ class MainWindow(QMainWindow):
         if self._panel_mode == "drawer":
             self._drawer.hide()
         self._fade_page_in(self._pages[key])
+        if key in self.category_boxes:
+            cur_cat = self.category_boxes[key].currentText()
+            self._current_category = "" if cur_cat == "All categories" else cur_cat
+        else:
+            self._current_category = ""
         if key in ("live", "movie"):
             self._current_kind = key
             self._refresh_grid()
@@ -2059,13 +2067,14 @@ class MainWindow(QMainWindow):
 
         # continue watching
         self._clear_layout(self.home_hist_row)
-        for name, url, played_at in self.history[:8]:
-            ch = next((c for c in self.channels if c.url == url), None)
+        for entry in self.history.all()[:8]:
+            ch = next((c for c in self.channels if c.url == entry.channel_url), None)
             if ch is None:
-                ch = Channel(name=name, url=url)
-            pos, dur = self._progress.get(url, (0, 0))
+                ch = Channel(name=entry.channel_name, url=entry.channel_url)
+            pos, dur = self._progress.get(entry.channel_url, (0, 0))
             pct = (pos / dur) if dur > 0 else 0.0
-            card = PosterCard(ch, pct, f"Watched {played_at}")
+            played_str = entry.played_at.strftime("%H:%M")
+            card = PosterCard(ch, pct, f"Watched {played_str}")
             card.clicked.connect(
                 lambda c=ch: self.play_channel(c, [c]))
             self.home_hist_row.addWidget(card)
@@ -2125,7 +2134,7 @@ class MainWindow(QMainWindow):
         if channel.kind == "movie":
             self._open_movie_details(channel)
             return
-        if (key == "series" and channel.kind == "series"
+        if (channel.kind == "series"
                 and channel.series_id and self._xtream is not None):
             self._open_series_detail(channel)
             return
@@ -2215,7 +2224,8 @@ class MainWindow(QMainWindow):
     # -- history page ---------------------------------------------------------------
     def _refresh_history_page(self) -> None:
         self._clear_layout(self.history_lay)
-        if not self.history:
+        entries = self.history.all()
+        if not entries:
             empty = EmptyState(
                 "history", "Nothing watched yet",
                 "Play a channel and it will show up here.",
@@ -2225,22 +2235,23 @@ class MainWindow(QMainWindow):
             self.history_lay.addWidget(empty)
             self.history_lay.addStretch(1)
             return
-        for name, url, played_at in self.history:
-            ch = next((c for c in self.channels if c.url == url), None)
+        for entry in entries:
+            ch = next((c for c in self.channels if c.url == entry.channel_url), None)
             if ch is None:
-                ch = Channel(name=name, url=url)
+                ch = Channel(name=entry.channel_name, url=entry.channel_url)
             row = QFrame()
             row.setObjectName("sideCard")
             hl = QHBoxLayout(row)
             hl.setContentsMargins(12, 8, 12, 8)
             art = QLabel()
-            art.setPixmap(poster_pixmap(96, 64, name, url))
+            art.setPixmap(poster_pixmap(96, 64, entry.channel_name, entry.channel_url))
             hl.addWidget(art)
             txt = QVBoxLayout()
-            title = QLabel(name)
+            title = QLabel(entry.channel_name)
             title.setObjectName("cardName")
             txt.addWidget(title)
-            txt.addWidget(QLabel(f"Watched {played_at}"))
+            played_str = entry.played_at.strftime("%H:%M")
+            txt.addWidget(QLabel(f"Watched {played_str}"))
             hl.addLayout(txt, 1)
             replay = QPushButton("Replay")
             replay.setObjectName("outlineBtn")
@@ -2295,11 +2306,7 @@ class MainWindow(QMainWindow):
 
         self.config.last_channel_url = channel.url
         self.config.sync()
-        stamp = datetime.now().strftime("%H:%M")
-        self.history = [(n, u, t) for n, u, t in self.history
-                        if u != channel.url]
-        self.history.insert(0, (channel.name, channel.url, stamp))
-        self.history = self.history[:30]
+        self.history.add(channel.name, channel.url)
 
         self._update_now_next()
         if self._current_page == "home":
@@ -2649,7 +2656,7 @@ class MainWindow(QMainWindow):
         n_ser = sum(1 for c in self.channels if c.kind == "series")
         self.status_text.setText(
             f"Provider: {self._playlist_name()}    Channels: {len(self.channels)}"
-            f"    Movies: {n_mov}    Series: {n_ser}")
+            f"    Live: {n_live}    Movies: {n_mov}    Series: {n_ser}")
         ok = len(self.channels) > 0
         self.conn_pill.set_connected(ok)
         self.stream_dot.setText("●")

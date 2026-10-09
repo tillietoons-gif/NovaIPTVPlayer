@@ -129,12 +129,6 @@ class XtreamClient:
     def is_active(self) -> bool:
         return str(self.user_info.get("status", "")).lower() == "active"
 
-    def max_connections(self) -> int:
-        try:
-            return int(self.user_info.get("max_connections") or 0)
-        except (TypeError, ValueError):
-            return 0
-
     # -- categories --------------------------------------------------------
     def _categories(self, action: str) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
@@ -164,13 +158,13 @@ class XtreamClient:
         out: list[dict[str, Any]] = []
         for item in _as_list(self._authed(params)):
             item = _as_dict(item)
-            sid = str(item.get("stream_id", ""))
+            sid = str(item.get("stream_id", "") or item.get("series_id", ""))
             if not sid:
                 continue
             entry: dict[str, Any] = {
                 "id": sid,
                 "name": str(item.get("name", "")).strip() or f"Stream {sid}",
-                "icon": str(item.get("stream_icon", "") or ""),
+                "icon": str(item.get("stream_icon", "") or item.get("cover", "") or ""),
                 "category_id": str(item.get("category_id", "") or ""),
                 "_raw": item,
             }
@@ -266,28 +260,6 @@ class XtreamClient:
         }
 
     # -- EPG ---------------------------------------------------------------
-    def short_epg(self, stream_id: str | int,
-                  limit: int = 4) -> list[dict[str, Any]]:
-        """Now/next style guide entries for one live stream."""
-        data = self._authed(
-            {"action": "get_short_epg", "stream_id": stream_id,
-             "limit": limit})
-        listings = _as_list(_as_dict(data).get("epg_listings"))
-        out: list[dict[str, Any]] = []
-        for item in listings:
-            item = _as_dict(item)
-            start = _ts_to_dt(item.get("start_timestamp"))
-            stop = _ts_to_dt(item.get("stop_timestamp"))
-            if start is None:
-                continue
-            out.append({
-                "title": str(item.get("title", "") or ""),
-                "start": start,
-                "stop": stop,
-                "description": str(item.get("description", "") or ""),
-            })
-        return out
-
     def xmltv_url(self) -> str:
         """Full XMLTV guide URL for this account (works with EPGManager)."""
         return (f"{self.server}/xmltv.php?username={self.username}"

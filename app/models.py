@@ -136,13 +136,14 @@ def xtream_series_to_channels(client, series_entries: list[dict],
     """
     channels: list[Channel] = []
     for s in series_entries:
+        sid = str(s.get("id", ""))
         channels.append(Channel(
-            name=s.get("name", "") or f"Series {s.get('id', '')}",
-            url="",  # filled when an episode is chosen
+            name=s.get("name", "") or f"Series {sid}",
+            url=f"xtream://series/{sid}" if sid else "",
             logo=s.get("icon", "") or "",
             kind="series",
             provider_id=provider_id,
-            series_id=str(s.get("id", "")),
+            series_id=sid,
         ))
     return channels
 

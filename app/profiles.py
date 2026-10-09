@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,7 +51,7 @@ class ProviderProfile:
 
     def redacted(self) -> str:
         """One-line summary that never includes the password."""
-        if self.is_xtream:
+        if self.is_xtream():
             who = f"{self.username}@{self.server}" if self.username else self.server
         else:
             who = self.playlist_url
