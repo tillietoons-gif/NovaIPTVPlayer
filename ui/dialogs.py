@@ -388,6 +388,10 @@ class ShortcutsDialog(QDialog):
         shortcuts = [
             ("Space", "Play / Pause stream"),
             ("F", "Toggle Fullscreen mode"),
+            ("P", "Picture-in-Picture (PiP) floating player"),
+            ("A", "Cycle Aspect Ratio (Auto / 16:9 / 4:3 / Fill)"),
+            ("C / S", "Audio & Subtitle track selector"),
+            ("E", "Launch in External Player (VLC / MPV)"),
             ("M", "Mute / Unmute audio"),
             ("↑ / ↓", "Volume up / down (±5%)"),
             ("← / →", "Prev / Next channel (or Seek ±10s in VOD)"),

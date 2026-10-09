@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from app import __app_name__, __version__
 from app.config import AppConfig
 from app.epg import EPGManager
+from app.external_player import launch_player, detect_players
 from app.favorites import FavoritesStore
 from app.history import HistoryStore
 from app.models import (
@@ -233,6 +234,266 @@ class _ClickableRow(QFrame):
         super().mousePressEvent(event)
 
 
+class _PipWindow(QWidget):
+    """Floating Picture-in-Picture window (always on top, resizable, frameless)."""
+
+    closed = Signal()
+
+    def __init__(self, main_window: MainWindow) -> None:
+        super().__init__(None, Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.main: MainWindow = main_window
+        self.setWindowTitle("Nova IPTV — Picture-in-Picture")
+        self.resize(440, 248)
+        self.setMinimumSize(280, 158)
+        self.setStyleSheet(f"background-color: {COLORS['bg']}; border: 1px solid {COLORS['border']};")
+        self.setMouseTracking(True)
+        self._drag_pos = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.video = VideoWidget(self, placeholder="")
+        self.video.setMouseTracking(True)
+        if hasattr(self.main, "thumb_video") and hasattr(self.main.thumb_video, "aspect_ratio"):
+            self.video.set_aspect_ratio(self.main.thumb_video.aspect_ratio())
+        self.video.installEventFilter(self)
+        layout.addWidget(self.video)
+
+        # Floating overlay top bar
+        self.overlay = QFrame(self)
+        self.overlay.setObjectName("pipOverlay")
+        self.overlay.setStyleSheet(f"""
+            QFrame#pipOverlay {{
+                background: rgba(8, 10, 15, 220);
+                border-bottom: 1px solid {COLORS['border']};
+            }}
+        """)
+        olay = QHBoxLayout(self.overlay)
+        olay.setContentsMargins(8, 6, 8, 6)
+        olay.setSpacing(6)
+
+        ch = self.main._current_channel
+        self.title_lbl = QLabel(ch.name if ch else "Nova IPTV")
+        self.title_lbl.setStyleSheet("color: white; font-weight: 600; font-size: 9pt;")
+        olay.addWidget(self.title_lbl, 1)
+
+        # Back to app
+        ret_btn = QPushButton()
+        ret_btn.setIcon(make_icon("back", 14, COLORS["text"]))
+        ret_btn.setToolTip("Return to App")
+        ret_btn.setFixedSize(26, 26)
+        ret_btn.setCursor(Qt.PointingHandCursor)
+        ret_btn.setStyleSheet(f"background: {COLORS['surface']}; border-radius: 13px; border: none;")
+        ret_btn.clicked.connect(self._restore_app)
+        olay.addWidget(ret_btn)
+
+        # Play / Pause
+        self.pp_btn = QPushButton()
+        self.pp_btn.setIcon(make_icon("pause", 14, "white"))
+        self.pp_btn.setToolTip("Play / Pause (Space)")
+        self.pp_btn.setFixedSize(26, 26)
+        self.pp_btn.setCursor(Qt.PointingHandCursor)
+        self.pp_btn.setStyleSheet(f"background: {COLORS['accent']}; border-radius: 13px; border: none;")
+        self.pp_btn.clicked.connect(self.main._toggle_pause)
+        olay.addWidget(self.pp_btn)
+
+        # Fullscreen
+        fs_btn = QPushButton()
+        fs_btn.setIcon(make_icon("expand", 14, COLORS["text"]))
+        fs_btn.setToolTip("Fullscreen (F)")
+        fs_btn.setFixedSize(26, 26)
+        fs_btn.setCursor(Qt.PointingHandCursor)
+        fs_btn.setStyleSheet(f"background: {COLORS['surface']}; border-radius: 13px; border: none;")
+        fs_btn.clicked.connect(self._go_fullscreen)
+        olay.addWidget(fs_btn)
+
+        # Close PiP
+        close_btn = QPushButton()
+        close_btn.setIcon(make_icon("close", 14, COLORS["text"]))
+        close_btn.setToolTip("Exit PiP (P / Esc)")
+        close_btn.setFixedSize(26, 26)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"background: {COLORS['surface']}; border-radius: 13px; border: none;")
+        close_btn.clicked.connect(self.close)
+        olay.addWidget(close_btn)
+
+        self.overlay.hide()
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setInterval(2200)
+        self._hide_timer.timeout.connect(self._auto_hide)
+
+        self.main.player.state_changed.connect(self._on_player_state)
+
+    def _auto_hide(self) -> None:
+        if not self.overlay.underMouse():
+            self.overlay.hide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.overlay.setGeometry(0, 0, self.width(), 38)
+        self.overlay.raise_()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.video:
+            if event.type() in (QEvent.MouseMove, QEvent.MouseButtonPress):
+                self.overlay.show()
+                self.overlay.raise_()
+                self._hide_timer.start()
+            elif event.type() == QEvent.MouseButtonDblClick:
+                self._go_fullscreen()
+                return True
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self.overlay.show()
+        self.overlay.raise_()
+        self._hide_timer.start()
+        if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_pos = None
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        key = event.key()
+        if key in (Qt.Key_Escape, Qt.Key_P):
+            self.close()
+        elif key == Qt.Key_Space:
+            self.main._toggle_pause()
+        elif key == Qt.Key_F:
+            self._go_fullscreen()
+        else:
+            super().keyPressEvent(event)
+
+    def _restore_app(self) -> None:
+        self.main.showNormal()
+        self.main.raise_()
+        self.main.activateWindow()
+        self.close()
+
+    def _go_fullscreen(self) -> None:
+        self.close()
+        self.main._toggle_fullscreen()
+
+    def _on_player_state(self, state: str) -> None:
+        if state == "playing":
+            self.pp_btn.setIcon(make_icon("pause", 14, "white"))
+        else:
+            self.pp_btn.setIcon(make_icon("play", 14, "white"))
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        try:
+            self.main.player.state_changed.disconnect(self._on_player_state)
+        except (RuntimeError, TypeError):
+            pass
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+class _AutoPlayNextBanner(QFrame):
+    """Next episode auto-play countdown notification banner."""
+    play_now_clicked = Signal()
+    cancelled = Signal()
+
+    def __init__(self, next_channel: Channel, countdown_sec: int = 10, parent=None) -> None:
+        super().__init__(parent)
+        self._countdown = countdown_sec
+        self.setObjectName("autoPlayBanner")
+        self.setStyleSheet(f"""
+            QFrame#autoPlayBanner {{
+                background: rgba(15, 17, 26, 240);
+                border: 1px solid {COLORS['accent']};
+                border-radius: 12px;
+            }}
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 10)
+        lay.setSpacing(12)
+
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(make_icon("layers", 22, COLORS["accent"]).pixmap(22, 22))
+        lay.addWidget(icon_lbl)
+
+        vbox = QVBoxLayout()
+        vbox.setSpacing(2)
+        self.count_lbl = QLabel(f"Playing next episode in {self._countdown}s...")
+        self.count_lbl.setStyleSheet(f"color: {COLORS['muted']}; font-size: 9pt;")
+        vbox.addWidget(self.count_lbl)
+
+        ep_title = next_channel.name
+        s = getattr(next_channel, "season", "")
+        e = getattr(next_channel, "episode_num", "")
+        if s and e:
+            try:
+                ep_title = f"S{int(s):02d}E{int(e):02d} — {ep_title}"
+            except (ValueError, TypeError):
+                ep_title = f"S{s}E{e} — {ep_title}"
+        self.title_lbl = QLabel(ep_title)
+        self.title_lbl.setStyleSheet("color: white; font-weight: 700; font-size: 11pt;")
+        vbox.addWidget(self.title_lbl)
+        lay.addLayout(vbox, 1)
+
+        self.play_btn = QPushButton("Play Now")
+        self.play_btn.setCursor(Qt.PointingHandCursor)
+        self.play_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {COLORS['accent']};
+                color: white;
+                font-weight: 600;
+                border-radius: 15px;
+                padding: 6px 16px;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background: {COLORS['accent2']};
+            }}
+        """)
+        self.play_btn.clicked.connect(self.play_now_clicked.emit)
+        lay.addWidget(self.play_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {COLORS['surface']};
+                color: {COLORS['text']};
+                font-weight: 600;
+                border-radius: 15px;
+                padding: 6px 14px;
+                border: 1px solid {COLORS['border']};
+            }}
+            QPushButton:hover {{
+                background: {COLORS['surface2']};
+                color: white;
+            }}
+        """)
+        self.cancel_btn.clicked.connect(self.cancelled.emit)
+        lay.addWidget(self.cancel_btn)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    def _tick(self) -> None:
+        self._countdown -= 1
+        if self._countdown <= 0:
+            self._timer.stop()
+            self.play_now_clicked.emit()
+        else:
+            self.count_lbl.setText(f"Playing next episode in {self._countdown}s...")
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+
 class _FullscreenVideo(QDialog):
     """Fullscreen playback window with auto-hiding controls, back button, and transport bar."""
 
@@ -245,11 +506,32 @@ class _FullscreenVideo(QDialog):
 
         self._is_dragging_seek = False
         self._current_dur_ms = 0
+        self._auto_play_banner: _AutoPlayNextBanner | None = None
+        self._auto_play_shown = False
 
         # Video surface (fills full dialog)
         self.video = VideoWidget(self, placeholder="")
         self.video.setMouseTracking(True)
+        if hasattr(self.main, "thumb_video") and hasattr(self.main.thumb_video, "aspect_ratio"):
+            self.video.set_aspect_ratio(self.main.thumb_video.aspect_ratio())
         self.video.installEventFilter(self)
+
+        # On-screen toast display (for aspect ratio changes etc.)
+        self._toast = QLabel("", self)
+        self._toast.hide()
+        self._toast.setStyleSheet(f"""
+            background: rgba(15, 17, 26, 230);
+            color: white;
+            padding: 9px 20px;
+            border-radius: 18px;
+            font-weight: 700;
+            font-size: 11pt;
+            border: 1px solid {COLORS['accent']};
+        """)
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.setInterval(1800)
+        self._toast_timer.timeout.connect(self._toast.hide)
 
         # Build overlay bars
         self._build_top_bar()
@@ -263,6 +545,7 @@ class _FullscreenVideo(QDialog):
         # Connect player signals for live feedback in fullscreen
         self.main.player.state_changed.connect(self._on_player_state)
         self.main.player.position_changed.connect(self._on_position_changed)
+        self.main.player.playback_finished.connect(self._on_playback_finished)
 
         # Initialize labels, states, and volumes
         self._update_channel_info()
@@ -386,7 +669,7 @@ class _FullscreenVideo(QDialog):
 
         # Controls row
         ctrl_lay = QHBoxLayout()
-        ctrl_lay.setSpacing(14)
+        ctrl_lay.setSpacing(12)
 
         # Previous Channel
         self.prev_btn = self._fs_btn("prev", 18, "Previous Channel (Left Arrow)", self._on_prev)
@@ -422,6 +705,25 @@ class _FullscreenVideo(QDialog):
 
         ctrl_lay.addStretch(1)
 
+        # Aspect Ratio button
+        cur_asp = self.video.aspect_ratio().upper()
+        self.aspect_btn = self._fs_btn("aspect", 18, f"Aspect Ratio: {cur_asp} (A)", self._toggle_aspect)
+        ctrl_lay.addWidget(self.aspect_btn)
+
+        # Audio & Subtitle Tracks button
+        self.tracks_btn = self._fs_btn("subtitle", 18, "Audio & Subtitles (C / S)", self._show_tracks_menu)
+        ctrl_lay.addWidget(self.tracks_btn)
+
+        # Picture-in-Picture button
+        self.pip_btn = self._fs_btn("pip", 18, "Picture-in-Picture (P)", self._on_pip)
+        ctrl_lay.addWidget(self.pip_btn)
+
+        # External Player button
+        self.ext_btn = self._fs_btn("external", 18, "Open in External Player (E)", self._on_external)
+        ctrl_lay.addWidget(self.ext_btn)
+
+        ctrl_lay.addSpacing(6)
+
         # Volume control
         self.mute_btn = self._fs_btn("volume", 18, "Mute (M)", self._on_mute)
         ctrl_lay.addWidget(self.mute_btn)
@@ -429,12 +731,12 @@ class _FullscreenVideo(QDialog):
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setRange(0, 125)
         self.vol_slider.setValue(self.main.config.volume)
-        self.vol_slider.setFixedWidth(110)
+        self.vol_slider.setFixedWidth(100)
         self.vol_slider.setCursor(Qt.PointingHandCursor)
         self.vol_slider.valueChanged.connect(self._on_vol_changed)
         ctrl_lay.addWidget(self.vol_slider)
 
-        ctrl_lay.addSpacing(10)
+        ctrl_lay.addSpacing(8)
 
         # Exit Fullscreen button
         self.exit_fs_btn = self._fs_btn("compress", 18, "Exit Fullscreen (Esc)", self.accept)
@@ -463,6 +765,78 @@ class _FullscreenVideo(QDialog):
         b.clicked.connect(slot)
         return b
 
+    def _toggle_aspect(self) -> None:
+        modes = ["auto", "16:9", "4:3", "fill"]
+        cur = self.video.aspect_ratio()
+        nxt = modes[(modes.index(cur) + 1) % len(modes)] if cur in modes else "auto"
+        self.video.set_aspect_ratio(nxt)
+        self.aspect_btn.setToolTip(f"Aspect Ratio: {nxt.upper()} (A)")
+        self._show_toast(f"Aspect Ratio: {nxt.upper()}")
+
+    def _show_toast(self, text: str) -> None:
+        self._toast.setText(text)
+        self._toast.adjustSize()
+        self._toast.move((self.width() - self._toast.width()) // 2, self.height() - 130)
+        self._toast.show()
+        self._toast.raise_()
+        self._toast_timer.start()
+
+    def _show_tracks_menu(self) -> None:
+        menu = QMenu(self)
+        audio_tracks = self.main.player.audio_tracks()
+        sub_tracks = self.main.player.subtitle_tracks()
+
+        # Audio Tracks
+        aud_label = menu.addAction("── Audio Tracks ──")
+        aud_label.setEnabled(False)
+        if not audio_tracks:
+            no_aud = menu.addAction("Default Stream Audio")
+            no_aud.setCheckable(True)
+            no_aud.setChecked(True)
+        else:
+            cur_a = self.main.player.current_audio_track
+            for t in audio_tracks:
+                idx = t.get("index", 0)
+                lang = (t.get("language") or "und").upper()
+                codec = t.get("codec") or ""
+                title = t.get("title") or f"Audio #{idx}"
+                desc = f"{lang} • {title} ({codec})" if codec else f"{lang} • {title}"
+                act = menu.addAction(desc)
+                act.setCheckable(True)
+                act.setChecked(idx == cur_a)
+                act.triggered.connect(partial(self.main.player.set_audio_track, idx))
+
+        menu.addSeparator()
+
+        # Subtitles
+        sub_label = menu.addAction("── Subtitles ──")
+        sub_label.setEnabled(False)
+        cur_s = self.main.player.current_subtitle_track
+        off_act = menu.addAction("Off (Disabled)")
+        off_act.setCheckable(True)
+        off_act.setChecked(cur_s < 0)
+        off_act.triggered.connect(lambda: self.main.player.set_subtitle_track(-1))
+
+        for s in sub_tracks:
+            idx = s.get("index", 0)
+            lang = (s.get("language") or "und").upper()
+            title = s.get("title") or f"Track #{idx}"
+            act = menu.addAction(f"{lang} • {title}")
+            act.setCheckable(True)
+            act.setChecked(idx == cur_s)
+            act.triggered.connect(partial(self.main.player.set_subtitle_track, idx))
+
+        pt = self.tracks_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6))
+        menu.exec(pt)
+
+    def _on_pip(self) -> None:
+        self.accept()
+        self.main._toggle_pip()
+
+    def _on_external(self) -> None:
+        self.main._launch_external()
+        self.accept()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         w, h = self.width(), self.height()
@@ -473,6 +847,12 @@ class _FullscreenVideo(QDialog):
         self.bottom_bar.setGeometry(0, h - bot_h, w, bot_h)
         self.top_bar.raise_()
         self.bottom_bar.raise_()
+        if self._toast.isVisible():
+            self._toast.move((w - self._toast.width()) // 2, h - 130)
+            self._toast.raise_()
+        if self._auto_play_banner and self._auto_play_banner.isVisible():
+            self._auto_play_banner.move(w - 480, h - 140)
+            self._auto_play_banner.raise_()
 
     def _show_controls(self) -> None:
         self.top_bar.show()
@@ -484,6 +864,8 @@ class _FullscreenVideo(QDialog):
         if self._is_dragging_seek:
             return
         if self.top_bar.underMouse() or self.bottom_bar.underMouse():
+            return
+        if self._auto_play_banner and self._auto_play_banner.underMouse():
             return
         self.top_bar.hide()
         self.bottom_bar.hide()
@@ -559,6 +941,54 @@ class _FullscreenVideo(QDialog):
             self.pos_label.setText(self._format_time(pos_ms // 1000))
             self.dur_label.setText(self._format_time(dur_ms // 1000))
 
+            # Auto-play next episode trigger at 95% progress
+            if pos_ms >= dur_ms * 0.95 and not self._auto_play_shown:
+                self._check_auto_play_next()
+
+    def _on_playback_finished(self) -> None:
+        if not self._auto_play_shown:
+            self._check_auto_play_next()
+
+    def _check_auto_play_next(self) -> None:
+        ch = self.main._current_channel
+        if ch is None or ch.kind != "series":
+            return
+        ctx = self.main._play_context
+        idx = self.main._play_index
+        if not ctx or idx + 1 >= len(ctx):
+            return
+        next_ep = ctx[idx + 1]
+        self._auto_play_shown = True
+        self._show_auto_play_banner(next_ep)
+
+    def _show_auto_play_banner(self, next_channel: Channel) -> None:
+        if self._auto_play_banner:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+        banner = _AutoPlayNextBanner(next_channel, 10, self)
+        banner.setFixedWidth(460)
+        banner.move(self.width() - 480, self.height() - 140)
+        banner.play_now_clicked.connect(lambda: self._play_next_auto(next_channel))
+        banner.cancelled.connect(self._cancel_auto_play)
+        banner.show()
+        banner.raise_()
+        self._auto_play_banner = banner
+
+    def _play_next_auto(self, next_channel: Channel) -> None:
+        if self._auto_play_banner:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+            self._auto_play_banner = None
+        self._auto_play_shown = False
+        self.main.play_channel(next_channel, self.main._play_context)
+        self._update_channel_info()
+
+    def _cancel_auto_play(self) -> None:
+        if self._auto_play_banner:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+            self._auto_play_banner = None
+
     def _on_seek_pressed(self) -> None:
         self._is_dragging_seek = True
         self._hide_timer.stop()
@@ -606,6 +1036,14 @@ class _FullscreenVideo(QDialog):
             self.accept()
         elif key == Qt.Key_Space:
             self._on_play_pause()
+        elif key == Qt.Key_A:
+            self._toggle_aspect()
+        elif key in (Qt.Key_C, Qt.Key_S):
+            self._show_tracks_menu()
+        elif key == Qt.Key_P:
+            self._on_pip()
+        elif key == Qt.Key_E:
+            self._on_external()
         elif key == Qt.Key_Left:
             if self._current_dur_ms > 0:
                 pos = self.main.player.position()
@@ -633,12 +1071,22 @@ class _FullscreenVideo(QDialog):
     def done(self, r: int) -> None:
         self.unsetCursor()
         self._hide_timer.stop()
+        if self._auto_play_banner:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+            self._auto_play_banner = None
+        if hasattr(self.main, "thumb_video") and hasattr(self.main.thumb_video, "set_aspect_ratio"):
+            self.main.thumb_video.set_aspect_ratio(self.video.aspect_ratio())
         try:
             self.main.player.state_changed.disconnect(self._on_player_state)
         except (RuntimeError, TypeError):
             pass
         try:
             self.main.player.position_changed.disconnect(self._on_position_changed)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.main.player.playback_finished.disconnect(self._on_playback_finished)
         except (RuntimeError, TypeError):
             pass
         super().done(r)
@@ -879,6 +1327,7 @@ class _MovieDetailsDialog(QDialog):
 NAV_ITEMS = [
     ("home", "Home", "home"),
     ("live", "Live TV", "tv"),
+    ("guide", "TV Guide", "calendar"),
     ("movie", "Movies", "film"),
     ("series", "TV Series", "layers"),
     ("catchup", "Catch-up", "replay"),
@@ -943,6 +1392,12 @@ class MainWindow(QMainWindow):
         self._count_labels: dict[str, QLabel] = {}
         self.category_boxes: dict[str, QComboBox] = {}
         self.grids: dict[str, ChannelGrid] = {}
+        self._pip_window: _PipWindow | None = None
+        self._auto_play_banner: _AutoPlayNextBanner | None = None
+        self._auto_play_dismissed = False
+        self._guide_start: datetime = datetime.now(timezone.utc).replace(
+            minute=0 if datetime.now(timezone.utc).minute < 30 else 30,
+            second=0, microsecond=0) - timedelta(minutes=30)
         # resume playback
         self._pending_resume_seek: float | None = None
         self._resume_seek_deadline = 0.0
@@ -1406,6 +1861,9 @@ class MainWindow(QMainWindow):
             self._position_search_overlay()
         if hasattr(self, "_login_overlay") and self._login_overlay.isVisible():
             self._login_overlay.setGeometry(central.rect())
+        if hasattr(self, "_auto_play_banner") and self._auto_play_banner and self._auto_play_banner.isVisible():
+            self._auto_play_banner.move(cw - 480, ch - 80)
+            self._auto_play_banner.raise_()
 
     def _apply_breakpoints(self) -> None:
         w = self.width()
@@ -1554,6 +2012,14 @@ class MainWindow(QMainWindow):
             self._toggle_pause()
         elif key == Qt.Key_F:
             self._toggle_fullscreen()
+        elif key == Qt.Key_P:
+            self._toggle_pip()
+        elif key == Qt.Key_A:
+            self._on_toggle_aspect()
+        elif key in (Qt.Key_C, Qt.Key_S):
+            self._show_tracks_menu()
+        elif key == Qt.Key_E:
+            self._on_launch_external()
         elif key == Qt.Key_M:
             self._toggle_mute()
         elif key == Qt.Key_Left:
@@ -1591,6 +2057,8 @@ class MainWindow(QMainWindow):
             return self._build_series_page()
         if key in ("live", "movie"):
             return self._build_grid_page(key)
+        if key == "guide":
+            return self._build_guide_page()
         if key == "catchup":
             return self._build_catchup_page()
         if key == "favorites":
@@ -1924,6 +2392,330 @@ class MainWindow(QMainWindow):
         self.grids[key] = grid
         return page
 
+    def _build_guide_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 18, 24, 18)
+        lay.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        title = QLabel("TV Guide")
+        title.setObjectName("pageTitle")
+        header.addWidget(title)
+
+        self.guide_category_box = QComboBox()
+        self.guide_category_box.setObjectName("catBox")
+        self.guide_category_box.addItem("All categories")
+        self.guide_category_box.setMinimumWidth(160)
+        self.guide_category_box.currentIndexChanged.connect(self._refresh_guide)
+        header.addWidget(self.guide_category_box)
+
+        header.addStretch(1)
+
+        nav_prev = QPushButton("◀ −2h")
+        nav_prev.setObjectName("outlineBtn")
+        nav_prev.setCursor(Qt.PointingHandCursor)
+        nav_prev.setToolTip("Scroll back 2 hours")
+        nav_prev.clicked.connect(self._guide_prev_window)
+        header.addWidget(nav_prev)
+
+        nav_now = QPushButton("Now")
+        nav_now.setObjectName("primaryBtn")
+        nav_now.setCursor(Qt.PointingHandCursor)
+        nav_now.setToolTip("Jump to current broadcast window")
+        nav_now.clicked.connect(self._guide_jump_now)
+        header.addWidget(nav_now)
+
+        nav_next = QPushButton("+2h ▶")
+        nav_next.setObjectName("outlineBtn")
+        nav_next.setCursor(Qt.PointingHandCursor)
+        nav_next.setToolTip("Scroll forward 2 hours")
+        nav_next.clicked.connect(self._guide_next_window)
+        header.addWidget(nav_next)
+
+        self.guide_window_lbl = QLabel("")
+        self.guide_window_lbl.setStyleSheet(f"color: {COLORS['muted']}; font-weight: 600; font-size: 10pt;")
+        header.addWidget(self.guide_window_lbl)
+
+        reload_btn = QPushButton("Reload guide")
+        reload_btn.setObjectName("outlineBtn")
+        reload_btn.setCursor(Qt.PointingHandCursor)
+        reload_btn.clicked.connect(lambda: self._load_epg(self._guide_source()))
+        header.addWidget(reload_btn)
+
+        lay.addLayout(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("guideScroll")
+        scroll.setStyleSheet(f"""
+            QScrollArea#guideScroll {{
+                background: {COLORS['bg']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 8px;
+            }}
+        """)
+        lay.addWidget(scroll, 1)
+
+        self.guide_inner = QWidget()
+        self.guide_inner.setStyleSheet(f"background: {COLORS['bg']};")
+        self.guide_lay = QVBoxLayout(self.guide_inner)
+        self.guide_lay.setContentsMargins(8, 8, 8, 8)
+        self.guide_lay.setSpacing(6)
+        scroll.setWidget(self.guide_inner)
+        return page
+
+    def _guide_prev_window(self) -> None:
+        self._guide_start -= timedelta(hours=2)
+        self._refresh_guide()
+
+    def _guide_jump_now(self) -> None:
+        now = datetime.now(timezone.utc)
+        self._guide_start = now.replace(minute=0 if now.minute < 30 else 30, second=0, microsecond=0) - timedelta(minutes=30)
+        self._refresh_guide()
+
+    def _guide_next_window(self) -> None:
+        self._guide_start += timedelta(hours=2)
+        self._refresh_guide()
+
+    def _refresh_guide(self) -> None:
+        if not hasattr(self, "guide_lay"):
+            return
+        self._clear_layout(self.guide_lay)
+
+        if not self.epg.loaded:
+            empty = EmptyState(
+                "calendar", "No TV Guide Loaded",
+                "Load an XMLTV guide to display timeline scheduling for Live TV.",
+                "Load Guide")
+            if empty.cta is not None:
+                empty.cta.clicked.connect(lambda: self._load_epg(self._guide_source()))
+            self.guide_lay.addWidget(empty)
+            self.guide_lay.addStretch(1)
+            return
+
+        live_channels = self._live_channels()
+        cur_cat = self.guide_category_box.currentText() if hasattr(self, "guide_category_box") else "All categories"
+        if cur_cat and cur_cat != "All categories":
+            live_channels = [c for c in live_channels if c.display_group == cur_cat]
+
+        if not live_channels:
+            empty = EmptyState("tv", "No channels found", "No live channels match the selected category.")
+            self.guide_lay.addWidget(empty)
+            self.guide_lay.addStretch(1)
+            return
+
+        guide_start = getattr(self, "_guide_start", None)
+        if guide_start is None:
+            now = datetime.now(timezone.utc)
+            guide_start = now.replace(minute=0 if now.minute < 30 else 30, second=0, microsecond=0) - timedelta(minutes=30)
+            self._guide_start = guide_start
+        hours = 4
+        guide_end = guide_start + timedelta(hours=hours)
+
+        if hasattr(self, "guide_window_lbl"):
+            self.guide_window_lbl.setText(
+                f"{guide_start.strftime('%a, %b %d')} • {guide_start.strftime('%H:%M')} – {guide_end.strftime('%H:%M')}"
+            )
+
+        _PX_PER_MIN = 3.6
+        total_mins = hours * 60
+        timeline_width = int(total_mins * _PX_PER_MIN)
+
+        # 1. Timeline Header Ruler (30-min marks)
+        ruler_row = QFrame()
+        ruler_row.setFixedHeight(34)
+        ruler_row.setStyleSheet(f"background: {COLORS['surface2']}; border-radius: 6px;")
+        rlay = QHBoxLayout(ruler_row)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        rlay.setSpacing(0)
+
+        ch_col_hdr = QLabel("  Channels")
+        ch_col_hdr.setFixedWidth(180)
+        ch_col_hdr.setStyleSheet(f"color: {COLORS['muted']}; font-weight: 700; font-size: 9pt;")
+        rlay.addWidget(ch_col_hdr)
+
+        time_track = QWidget()
+        time_track.setFixedWidth(timeline_width)
+        time_track_lay = QHBoxLayout(time_track)
+        time_track_lay.setContentsMargins(0, 0, 0, 0)
+        time_track_lay.setSpacing(0)
+
+        step_mins = 30
+        for slot in range(0, total_mins, step_mins):
+            slot_dt = guide_start + timedelta(minutes=slot)
+            slot_lbl = QLabel(slot_dt.strftime("%H:%M"))
+            slot_lbl.setFixedWidth(int(step_mins * _PX_PER_MIN))
+            slot_lbl.setStyleSheet(f"color: {COLORS['text']}; font-size: 9pt; font-family: monospace; border-left: 1px solid {COLORS['border']}; padding-left: 4px;")
+            time_track_lay.addWidget(slot_lbl)
+        rlay.addWidget(time_track)
+        rlay.addStretch(1)
+        self.guide_lay.addWidget(ruler_row)
+
+        now = datetime.now(timezone.utc)
+
+        # 2. Channel rows (render up to 60 live channels for fluid scrolling)
+        for ch in live_channels[:60]:
+            row = QFrame()
+            row.setObjectName("sideCard")
+            row.setFixedHeight(54)
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(0)
+
+            ch_badge = _ClickableRow(ch)
+            ch_badge.setFixedWidth(180)
+            ch_badge.setStyleSheet(f"border-right: 1px solid {COLORS['border']}; background: {COLORS['surface']}; padding: 4px 8px;")
+            cblay = QHBoxLayout(ch_badge)
+            cblay.setContentsMargins(8, 4, 8, 4)
+            cblay.setSpacing(8)
+
+            logo = LogoLabel(size=28)
+            logo.load_url(ch.logo or "")
+            cblay.addWidget(logo)
+
+            ch_name = ElidedLabel(ch.name)
+            ch_name.setStyleSheet("font-weight: 600; font-size: 9pt; color: white;")
+            cblay.addWidget(ch_name, 1)
+
+            ch_badge.clicked.connect(lambda c=ch: self.play_channel(c, self._live_channels()))
+            row_lay.addWidget(ch_badge)
+
+            prog_container = QWidget()
+            prog_container.setFixedWidth(timeline_width)
+            prog_lay = QHBoxLayout(prog_container)
+            prog_lay.setContentsMargins(0, 2, 0, 2)
+            prog_lay.setSpacing(2)
+
+            progs = self.epg.guide_window(ch.tvg_id, ch.name, start=guide_start, hours=hours)
+            if not progs:
+                no_p = QLabel("No guide schedule available")
+                no_p.setStyleSheet(f"color: {COLORS['muted']}; font-style: italic; font-size: 9pt; padding-left: 12px;")
+                prog_lay.addWidget(no_p, 1)
+            else:
+                for pr in progs:
+                    p_start = max(guide_start, pr.start)
+                    p_stop = min(guide_end, pr.stop)
+                    dur_secs = (p_stop - p_start).total_seconds()
+                    if dur_secs <= 0:
+                        continue
+                    dur_mins = dur_secs / 60.0
+                    card_w = max(40, int(dur_mins * _PX_PER_MIN) - 3)
+
+                    p_btn = QPushButton()
+                    p_btn.setCursor(Qt.PointingHandCursor)
+                    p_btn.setFixedWidth(card_w)
+                    p_btn.setFixedHeight(46)
+
+                    is_current = (pr.start <= now < pr.stop)
+                    is_past = (pr.stop <= now)
+
+                    title_txt = pr.title
+                    time_txt = f"{pr.start.strftime('%H:%M')}–{pr.stop.strftime('%H:%M')}"
+                    p_btn.setText(f"{title_txt}\n{time_txt}")
+
+                    if is_current:
+                        p_btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background: rgba(139, 92, 246, 0.25);
+                                border: 1.5px solid {COLORS['accent']};
+                                border-radius: 6px;
+                                color: white;
+                                font-size: 8.5pt;
+                                font-weight: 600;
+                                text-align: left;
+                                padding: 3px 6px;
+                            }}
+                            QPushButton:hover {{
+                                background: rgba(139, 92, 246, 0.45);
+                            }}
+                        """)
+                    elif is_past:
+                        p_btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background: rgba(26, 30, 42, 0.6);
+                                border: 1px solid {COLORS['border']};
+                                border-radius: 6px;
+                                color: {COLORS['muted']};
+                                font-size: 8pt;
+                                text-align: left;
+                                padding: 3px 6px;
+                            }}
+                            QPushButton:hover {{
+                                background: {COLORS['surface2']};
+                                color: white;
+                            }}
+                        """)
+                    else:
+                        p_btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background: {COLORS['surface']};
+                                border: 1px solid {COLORS['border']};
+                                border-radius: 6px;
+                                color: {COLORS['text']};
+                                font-size: 8.5pt;
+                                text-align: left;
+                                padding: 3px 6px;
+                            }}
+                            QPushButton:hover {{
+                                background: {COLORS['surface2']};
+                                border-color: {COLORS['accent']};
+                                color: white;
+                            }}
+                        """)
+
+                    p_btn.setToolTip(f"{pr.title}\n{time_txt}\n\n{pr.desc or 'No synopsis'}")
+                    if is_current:
+                        p_btn.clicked.connect(lambda _=False, c=ch: self.play_channel(c, self._live_channels()))
+                    elif is_past and self._xtream and self._profile and self._profile.is_xtream() and getattr(ch, "stream_id", None):
+                        p_btn.clicked.connect(partial(self._play_timeshift, ch, pr))
+                    else:
+                        p_btn.clicked.connect(partial(self._show_program_dialog, ch, pr))
+
+                    prog_lay.addWidget(p_btn)
+                prog_lay.addStretch(1)
+
+            row_lay.addWidget(prog_container)
+            row_lay.addStretch(1)
+            self.guide_lay.addWidget(row)
+
+        self.guide_lay.addStretch(1)
+
+    def _show_program_dialog(self, channel: Channel, program: EPGProgram) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{program.title} — {channel.name}")
+        dlg.setMinimumWidth(440)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(12)
+
+        t_lbl = QLabel(program.title)
+        t_lbl.setStyleSheet("color: white; font-size: 13pt; font-weight: 700;")
+        lay.addWidget(t_lbl)
+
+        time_lbl = QLabel(f"Airs: {program.start.strftime('%A, %b %d • %H:%M')} – {program.stop.strftime('%H:%M')}")
+        time_lbl.setStyleSheet(f"color: {COLORS['accent']}; font-weight: 600; font-size: 10pt;")
+        lay.addWidget(time_lbl)
+
+        ch_lbl = QLabel(f"Channel: {channel.name} ({channel.display_group})")
+        ch_lbl.setStyleSheet(f"color: {COLORS['muted']}; font-size: 9.5pt;")
+        lay.addWidget(ch_lbl)
+
+        desc = QLabel(program.desc or "No program synopsis available.")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color: {COLORS['text']}; font-size: 10pt; line-height: 1.4;")
+        lay.addWidget(desc)
+
+        buttons = QDialogButtonBox()
+        watch_btn = buttons.addButton("Watch Live Now", QDialogButtonBox.ActionRole)
+        watch_btn.setStyleSheet(f"background: {COLORS['accent']}; color: white; border-radius: 4px; padding: 6px 14px;")
+        watch_btn.clicked.connect(lambda: (dlg.accept(), self.play_channel(channel, self._live_channels())))
+        close_btn = buttons.addButton(QDialogButtonBox.Close)
+        close_btn.clicked.connect(dlg.reject)
+        lay.addWidget(buttons)
+
+        dlg.exec()
+
     def _build_catchup_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
@@ -2100,6 +2892,8 @@ class MainWindow(QMainWindow):
         self.thumb_video = VideoWidget(placeholder="Select a channel to play")
         self.thumb_video.setFixedHeight(150)
         self.thumb_video.mouseDoubleClickEvent = lambda _e: self._toggle_fullscreen()
+        self.thumb_video.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.thumb_video.customContextMenuRequested.connect(self._show_video_context_menu)
         self.thumb_video.setCursor(Qt.PointingHandCursor)
         self.thumb_video.setToolTip("Double-click for fullscreen (or press F)")
         cl.addWidget(self.thumb_video)
@@ -2144,7 +2938,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(card)
 
         transport = QHBoxLayout()
-        transport.setSpacing(8)
+        transport.setSpacing(6)
         self.prev_btn = self._tbtn("prev", self._play_prev)
         self.pp_btn = self._tbtn("play", self._toggle_pause)
         self.next_btn = self._tbtn("next", self._play_next)
@@ -2152,8 +2946,18 @@ class MainWindow(QMainWindow):
         self.rec_btn.setIcon(make_icon("rec", 14, COLORS["red"]))
         self.rec_btn.setToolTip("Record")
         self.rec_btn.setEnabled(False)
+        self.aspect_btn = self._tbtn("aspect", self._on_toggle_aspect)
+        self.aspect_btn.setToolTip("Aspect Ratio (Auto / 16:9 / 4:3 / Fill) (A)")
+        self.tracks_btn = self._tbtn("subtitle", self._show_tracks_menu)
+        self.tracks_btn.setToolTip("Audio & Subtitle Tracks (C / S)")
+        self.ext_btn = self._tbtn("external", self._on_launch_external)
+        self.ext_btn.setToolTip("Play in External Player (VLC / MPV) (E)")
+        self.pip_btn = self._tbtn("pip", self._toggle_pip)
+        self.pip_btn.setToolTip("Picture-in-Picture (P)")
         self.fs_btn = self._tbtn("expand", self._toggle_fullscreen)
-        for b in (self.prev_btn, self.pp_btn, self.next_btn, self.rec_btn):
+        self.fs_btn.setToolTip("Fullscreen (F)")
+        for b in (self.prev_btn, self.pp_btn, self.next_btn, self.rec_btn,
+                  self.aspect_btn, self.tracks_btn, self.ext_btn, self.pip_btn):
             transport.addWidget(b)
         transport.addStretch(1)
         transport.addWidget(self.fs_btn)
@@ -2268,6 +3072,8 @@ class MainWindow(QMainWindow):
             self._refresh_grid()
         elif key == "home":
             self._refresh_home()
+        elif key == "guide":
+            self._refresh_guide()
         elif key == "catchup":
             self._refresh_catchup()
         elif key == "history":
@@ -2450,6 +3256,12 @@ class MainWindow(QMainWindow):
             box.addItem("All categories")
             box.addItems(categories(channels, kind))
             box.blockSignals(False)
+        if hasattr(self, "guide_category_box"):
+            self.guide_category_box.blockSignals(True)
+            self.guide_category_box.clear()
+            self.guide_category_box.addItem("All categories")
+            self.guide_category_box.addItems(categories(channels, "live"))
+            self.guide_category_box.blockSignals(False)
         self._current_category = ""
         self._update_status()
         self._refresh_grid()
@@ -2480,7 +3292,9 @@ class MainWindow(QMainWindow):
     def _on_epg_loaded(self) -> None:
         self._refresh_grid()
         self._refresh_home()
-        if self._current_page == "catchup":
+        if self._current_page == "guide":
+            self._refresh_guide()
+        elif self._current_page == "catchup":
             self._refresh_catchup()
         self._update_now_next()
         self._update_bell()
@@ -2637,6 +3451,20 @@ class MainWindow(QMainWindow):
         play_act = menu.addAction(make_icon("play", 16), f"Play '{channel.name}'")
         play_act.triggered.connect(lambda: self.play_channel(channel, self._visible_channels()))
 
+        pip_act = menu.addAction(make_icon("pip", 16), "Picture-in-Picture")
+        pip_act.triggered.connect(lambda: (self.play_channel(channel, [channel]), self._toggle_pip()))
+
+        ext_menu = menu.addMenu(make_icon("external", 16), "Play in External Player")
+        ext_menu.addAction("Auto Detect / Default").triggered.connect(
+            lambda: self._launch_external(channel, "auto"))
+        detected = detect_players()
+        for p_name in ("VLC", "MPV", "PotPlayer"):
+            if p_name in detected:
+                ext_menu.addAction(f"Launch with {p_name}").triggered.connect(
+                    partial(self._launch_external, channel, p_name.lower()))
+
+        menu.addSeparator()
+
         is_fav = channel.url in self.favorites.all()
         fav_icon = make_icon("star" if is_fav else "star_outline", 16,
                              COLORS["accent"] if is_fav else COLORS["text"])
@@ -2703,6 +3531,7 @@ class MainWindow(QMainWindow):
                 "search", "No programmes found",
                 "No programmes found for today in the loaded guide.")
             return
+        now = datetime.now(timezone.utc)
         for _start, pr, ch in items[:80]:
             row = QFrame()
             row.setObjectName("sideCard")
@@ -2722,14 +3551,47 @@ class MainWindow(QMainWindow):
             chan.setObjectName("upChannel")
             txt.addWidget(chan)
             hl.addLayout(txt, 1)
-            watch = QPushButton("Watch channel")
-            watch.setObjectName("outlineBtn")
-            watch.setCursor(Qt.PointingHandCursor)
-            watch.clicked.connect(
-                lambda _=False, c=ch: self.play_channel(c, self._live_channels()))
+
+            is_past = pr.stop <= now
+            is_xtream_catchup = bool(
+                self._xtream and self._profile and self._profile.is_xtream()
+                and getattr(ch, "stream_id", None)
+            )
+
+            if is_past and is_xtream_catchup:
+                watch = QPushButton("  Replay (Catch-up)")
+                watch.setIcon(make_icon("replay", 14, COLORS["accent"]))
+                watch.setObjectName("primaryBtn")
+                watch.setCursor(Qt.PointingHandCursor)
+                watch.clicked.connect(partial(self._play_timeshift, ch, pr))
+            else:
+                watch = QPushButton("Watch Live" if not is_past else "Watch Channel")
+                watch.setObjectName("outlineBtn")
+                watch.setCursor(Qt.PointingHandCursor)
+                watch.clicked.connect(
+                    lambda _=False, c=ch: self.play_channel(c, self._live_channels()))
+
             hl.addWidget(watch)
             self.catchup_lay.addWidget(row)
         self.catchup_lay.addStretch(1)
+
+    def _play_timeshift(self, channel: Channel, program: EPGProgram) -> None:
+        if not self._xtream or not getattr(channel, "stream_id", None):
+            self._flash_status("Catch-up replay is not supported for this channel", 3000)
+            return
+        duration_min = max(1, int((program.stop - program.start).total_seconds() / 60))
+        url = self._xtream.timeshift_url(channel.stream_id, program.start, duration_min)
+        replay_channel = Channel(
+            id=f"catchup_{channel.stream_id}_{int(program.start.timestamp())}",
+            name=f"{channel.name} — {program.title} (Catch-up)",
+            url=url,
+            kind="movie",
+            group=channel.group,
+            logo=channel.logo,
+            tvg_id=channel.tvg_id,
+        )
+        self.play_channel(replay_channel, [replay_channel])
+        self._flash_status(f"Replaying Catch-up: {program.title}", 3500)
 
     # -- history page ---------------------------------------------------------------
     def _refresh_history_page(self) -> None:
@@ -2798,6 +3660,13 @@ class MainWindow(QMainWindow):
         else:
             self._play_index = self._play_context.index(channel)
         self._current_channel = channel
+        if hasattr(self, "_auto_play_banner") and self._auto_play_banner:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+            self._auto_play_banner = None
+        self._auto_play_dismissed = False
+        if self._pip_window is not None and hasattr(self._pip_window, "title_lbl"):
+            self._pip_window.title_lbl.setText(channel.name)
 
         self.thumb_video.clear()
         if hasattr(self, "np_seek_row"):
@@ -2966,18 +3835,189 @@ class MainWindow(QMainWindow):
         self.player.toggle_pause()
 
     def _toggle_fullscreen(self) -> None:
+        if self._pip_window is not None:
+            self._pip_window.close()
         dlg = _FullscreenVideo(self)
         try:
             self.player.frame_ready.disconnect(self.thumb_video.set_frame)
         except (RuntimeError, TypeError):
             pass
         self.player.frame_ready.connect(dlg.video.set_frame)
+        self.player.attach(dlg.video)
         dlg.exec()
         try:
             self.player.frame_ready.disconnect(dlg.video.set_frame)
         except (RuntimeError, TypeError):
             pass
         self.player.frame_ready.connect(self.thumb_video.set_frame)
+        self.player.attach(self.thumb_video)
+        self.thumb_video.set_aspect_ratio(dlg.video.aspect_ratio())
+
+    def _toggle_pip(self) -> None:
+        if self._pip_window is not None:
+            self._pip_window.close()
+            return
+        if not self.player.current_url:
+            self._flash_status("Nothing playing to show in Picture-in-Picture", 2500)
+            return
+
+        pip = _PipWindow(self)
+        self._pip_window = pip
+        pip.closed.connect(self._on_pip_closed)
+
+        try:
+            self.player.frame_ready.disconnect(self.thumb_video.set_frame)
+        except (RuntimeError, TypeError):
+            pass
+        self.player.frame_ready.connect(pip.video.set_frame)
+        self.player.attach(pip.video)
+
+        screen = self.screen().availableGeometry()
+        pip.move(screen.right() - pip.width() - 24, screen.bottom() - pip.height() - 32)
+        pip.show()
+        self._flash_status("Picture-in-Picture active (floating on top)", 3000)
+
+    def _on_pip_closed(self) -> None:
+        if self._pip_window is not None:
+            try:
+                self.player.frame_ready.disconnect(self._pip_window.video.set_frame)
+            except (RuntimeError, TypeError):
+                pass
+            self.thumb_video.set_aspect_ratio(self._pip_window.video.aspect_ratio())
+            self._pip_window = None
+
+        self.player.frame_ready.connect(self.thumb_video.set_frame)
+        self.player.attach(self.thumb_video)
+
+    def _on_toggle_aspect(self) -> None:
+        modes = ["auto", "16:9", "4:3", "fill"]
+        cur = self.thumb_video.aspect_ratio()
+        nxt = modes[(modes.index(cur) + 1) % len(modes)] if cur in modes else "auto"
+        self.thumb_video.set_aspect_ratio(nxt)
+        if hasattr(self, "aspect_btn"):
+            self.aspect_btn.setToolTip(f"Aspect Ratio: {nxt.upper()} (A)")
+        self._flash_status(f"Aspect Ratio: {nxt.upper()}", 2000)
+
+    def _show_tracks_menu(self) -> None:
+        menu = QMenu(self)
+        audio_tracks = self.player.audio_tracks()
+        sub_tracks = self.player.subtitle_tracks()
+
+        aud_label = menu.addAction("── Audio Tracks ──")
+        aud_label.setEnabled(False)
+        if not audio_tracks:
+            no_aud = menu.addAction("Default Stream Audio")
+            no_aud.setCheckable(True)
+            no_aud.setChecked(True)
+        else:
+            cur_a = self.player.current_audio_track
+            for t in audio_tracks:
+                idx = t.get("index", 0)
+                lang = (t.get("language") or "und").upper()
+                codec = t.get("codec") or ""
+                title = t.get("title") or f"Audio #{idx}"
+                desc = f"{lang} • {title} ({codec})" if codec else f"{lang} • {title}"
+                act = menu.addAction(desc)
+                act.setCheckable(True)
+                act.setChecked(idx == cur_a)
+                act.triggered.connect(partial(self.player.set_audio_track, idx))
+
+        menu.addSeparator()
+
+        sub_label = menu.addAction("── Subtitles ──")
+        sub_label.setEnabled(False)
+        cur_s = self.player.current_subtitle_track
+        off_act = menu.addAction("Off (Disabled)")
+        off_act.setCheckable(True)
+        off_act.setChecked(cur_s < 0)
+        off_act.triggered.connect(lambda: self.player.set_subtitle_track(-1))
+
+        for s in sub_tracks:
+            idx = s.get("index", 0)
+            lang = (s.get("language") or "und").upper()
+            title = s.get("title") or f"Track #{idx}"
+            act = menu.addAction(f"{lang} • {title}")
+            act.setCheckable(True)
+            act.setChecked(idx == cur_s)
+            act.triggered.connect(partial(self.player.set_subtitle_track, idx))
+
+        if hasattr(self, "tracks_btn"):
+            pt = self.tracks_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 4))
+            menu.exec(pt)
+        else:
+            menu.exec(self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2)))
+
+    def _show_video_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+
+        asp_menu = menu.addMenu(make_icon("aspect", 16), "Aspect Ratio")
+        cur_mode = self.thumb_video.aspect_ratio()
+        for mode, lbl in (("auto", "Auto (Fit)"), ("16:9", "16:9 (Widescreen)"),
+                          ("4:3", "4:3 (Classic)"), ("fill", "Fill / Stretch")):
+            act = asp_menu.addAction(lbl)
+            act.setCheckable(True)
+            act.setChecked(cur_mode == mode)
+            act.triggered.connect(partial(self.thumb_video.set_aspect_ratio, mode))
+
+        aud_menu = menu.addMenu("Audio Tracks")
+        audio_tracks = self.player.audio_tracks()
+        if not audio_tracks:
+            no_a = aud_menu.addAction("Default Audio")
+            no_a.setEnabled(False)
+        else:
+            cur_a = self.player.current_audio_track
+            for t in audio_tracks:
+                idx = t.get("index", 0)
+                lang = (t.get("language") or "und").upper()
+                act = aud_menu.addAction(f"{lang} - Track #{idx}")
+                act.setCheckable(True)
+                act.setChecked(idx == cur_a)
+                act.triggered.connect(partial(self.player.set_audio_track, idx))
+
+        sub_menu = menu.addMenu(make_icon("subtitle", 16), "Subtitles")
+        cur_s = self.player.current_subtitle_track
+        off_act = sub_menu.addAction("Off")
+        off_act.setCheckable(True)
+        off_act.setChecked(cur_s < 0)
+        off_act.triggered.connect(lambda: self.player.set_subtitle_track(-1))
+        for s in self.player.subtitle_tracks():
+            idx = s.get("index", 0)
+            lang = (s.get("language") or "und").upper()
+            act = sub_menu.addAction(f"{lang} - Track #{idx}")
+            act.setCheckable(True)
+            act.setChecked(idx == cur_s)
+            act.triggered.connect(partial(self.player.set_subtitle_track, idx))
+
+        menu.addSeparator()
+
+        pip_act = menu.addAction(make_icon("pip", 16), "Picture-in-Picture (P)")
+        pip_act.triggered.connect(self._toggle_pip)
+
+        ext_act = menu.addAction(make_icon("external", 16), "Play in External Player (VLC / MPV)")
+        ext_act.triggered.connect(self._on_launch_external)
+
+        fs_act = menu.addAction(make_icon("expand", 16), "Fullscreen (F)")
+        fs_act.triggered.connect(self._toggle_fullscreen)
+
+        menu.exec(self.thumb_video.mapToGlobal(pos))
+
+    def _on_launch_external(self) -> None:
+        self._launch_external(self._current_channel)
+
+    def _launch_external(self, channel: Channel | None = None, choice: str = "auto") -> None:
+        ch = channel or self._current_channel
+        if not ch or not ch.url:
+            self._flash_status("No stream available to launch externally", 2500)
+            return
+        ok, msg = launch_player(ch.url, ch.name, choice)
+        if ok:
+            self._flash_status(f"Launched in external player: {msg}", 3500)
+        else:
+            QMessageBox.information(
+                self, "External Player",
+                f"Could not launch stream in {choice}:\n{msg}\n\n"
+                "Tip: Install VLC or MPV for native playback support."
+            )
 
     def _on_volume(self, value: int) -> None:
         self.player.set_volume(value)
@@ -3024,6 +4064,14 @@ class MainWindow(QMainWindow):
                         self.np_time_dur.setText(_fmt_time(dur_ms / 1000))
                 else:
                     self.np_seek_row.hide()
+
+            # auto-play next episode trigger at >= 95%
+            if (self._current_channel.kind == "series"
+                    and dur_ms > 0 and pos_ms >= dur_ms * 0.95
+                    and not self._auto_play_dismissed and self._auto_play_banner is None):
+                if self._play_context and self._play_index + 1 < len(self._play_context):
+                    self._show_auto_play_next(self._play_context[self._play_index + 1])
+
         # resume-seek: the engine may need a moment before seek() works;
         # retry on each position report for ~5 s, then play from the start.
         if self._pending_resume_seek is not None:
@@ -3038,6 +4086,37 @@ class MainWindow(QMainWindow):
         ch = self._current_channel
         if ch is not None and ch.kind in ("movie", "series") and ch.url:
             self.resume.clear(ch.url)
+        if (ch is not None and ch.kind == "series"
+                and not self._auto_play_dismissed and self._auto_play_banner is None):
+            if self._play_context and self._play_index + 1 < len(self._play_context):
+                self._show_auto_play_next(self._play_context[self._play_index + 1])
+
+    def _show_auto_play_next(self, next_ch: Channel) -> None:
+        if self._auto_play_banner is not None:
+            return
+        banner = _AutoPlayNextBanner(next_ch, 10, self)
+        banner.setFixedWidth(460)
+        cw, ch = self.width(), self.height()
+        banner.move(cw - 480, ch - banner.sizeHint().height() - 40)
+        banner.play_now_clicked.connect(lambda: self._play_auto_next(next_ch))
+        banner.cancelled.connect(self._cancel_auto_next)
+        banner.show()
+        banner.raise_()
+        self._auto_play_banner = banner
+
+    def _play_auto_next(self, next_ch: Channel) -> None:
+        if self._auto_play_banner is not None:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+            self._auto_play_banner = None
+        self.play_channel(next_ch, self._play_context)
+
+    def _cancel_auto_next(self) -> None:
+        if self._auto_play_banner is not None:
+            self._auto_play_banner.stop()
+            self._auto_play_banner.deleteLater()
+            self._auto_play_banner = None
+        self._auto_play_dismissed = True
 
     def _on_player_state(self, state: str) -> None:
         self._player_state = state
@@ -3071,7 +4150,15 @@ class MainWindow(QMainWindow):
                    "or the playlist URL expired.")
             if detail:
                 msg += f"\n\nDetails: {detail}"
-            QMessageBox.warning(self, "Playback error", msg)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("Playback error")
+            box.setText(msg)
+            launch_btn = box.addButton("Launch in External Player (VLC / MPV)", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Close)
+            box.exec()
+            if box.clickedButton() == launch_btn:
+                self._launch_external()
 
     # -- now playing panel ----------------------------------------------------------
     def _update_now_next(self) -> None:

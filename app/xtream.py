@@ -280,3 +280,15 @@ class XtreamClient:
         ext = (ext or "mp4").lstrip(".") or "mp4"
         return (f"{self.server}/series/{self.username}/{self.password}"
                 f"/{episode_id}.{ext}")
+
+    def timeshift_url(self, stream_id: str | int, start: datetime,
+                      duration_minutes: int) -> str:
+        """Catchup timeshift archive URL.
+
+        Format: {server}/timeshift/{username}/{password}/{duration_minutes}/{YYYY-MM-DD:HH-MM}/{stream_id}.ts
+        """
+        start_str = start.strftime("%Y-%m-%d:%H-%M")
+        dur = max(1, int(duration_minutes))
+        return (f"{self.server}/timeshift/{self.username}/{self.password}"
+                f"/{dur}/{start_str}/{stream_id}.ts")
+

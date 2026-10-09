@@ -11,7 +11,7 @@ import math
 import requests
 from PySide6.QtCore import (
     Qt, Signal, Slot, QRunnable, QThreadPool, QObject,
-    QPoint, QPointF, QRectF, QSize, QTimer, QPropertyAnimation,
+    QPoint, QPointF, QRect, QRectF, QSize, QTimer, QPropertyAnimation,
     QEasingCurve,
 )
 from PySide6.QtGui import (
@@ -275,6 +275,42 @@ def make_icon(name: str, size: int = 20,
         p.setPen(Qt.NoPen)
         p.setBrush(col)
         p.drawEllipse(QRectF(s * 0.46, s * 0.68, s * 0.08, s * 0.08))
+    elif name == "aspect":
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.26, s * 0.68, s * 0.48), 3, 3)
+        line(0.32, 0.44, 0.44, 0.56)
+        line(0.44, 0.44, 0.32, 0.56)
+        line(0.56, 0.44, 0.68, 0.56)
+    elif name == "pip":
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.22, s * 0.68, s * 0.56), 4, 4)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawRoundedRect(QRectF(s * 0.48, s * 0.46, s * 0.30, s * 0.26), 2, 2)
+    elif name in ("subtitle", "cc"):
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.26, s * 0.68, s * 0.48), 4, 4)
+        line(0.32, 0.42, 0.46, 0.42)
+        line(0.32, 0.50, 0.46, 0.50)
+        line(0.32, 0.58, 0.46, 0.58)
+        line(0.54, 0.42, 0.68, 0.42)
+        line(0.54, 0.50, 0.68, 0.50)
+        line(0.54, 0.58, 0.68, 0.58)
+    elif name in ("calendar", "epg"):
+        p.drawRoundedRect(QRectF(s * 0.20, s * 0.24, s * 0.60, s * 0.56), 4, 4)
+        line(0.20, 0.40, 0.80, 0.40)
+        line(0.35, 0.18, 0.35, 0.28)
+        line(0.65, 0.18, 0.65, 0.28)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawRect(QRectF(s * 0.32, s * 0.48, s * 0.10, s * 0.08))
+        p.drawRect(QRectF(s * 0.48, s * 0.48, s * 0.10, s * 0.08))
+        p.drawRect(QRectF(s * 0.32, s * 0.62, s * 0.10, s * 0.08))
+        p.drawRect(QRectF(s * 0.48, s * 0.62, s * 0.10, s * 0.08))
+    elif name in ("external", "launch"):
+        line(0.28, 0.42, 0.28, 0.74)
+        line(0.28, 0.74, 0.72, 0.74)
+        line(0.72, 0.74, 0.72, 0.48)
+        line(0.46, 0.54, 0.72, 0.28)
+        line(0.54, 0.28, 0.72, 0.28)
+        line(0.72, 0.28, 0.72, 0.46)
     p.end()
     return QIcon(pm)
 
@@ -804,19 +840,15 @@ class Drawer(QObject):
 # -- video display ---------------------------------------------------------------
 
 class VideoWidget(QWidget):
-    """Displays decoded video frames from the player engine.
-
-    Frames arrive via the ``set_frame`` slot (emitted from the decode
-    thread -- Qt queues the call into the GUI thread automatically).
-    Each frame is painted aspect-fit and centered on a black background;
-    before the first frame (or after ``clear()``) a placeholder is shown.
-    """
+    """Displays decoded video frames from the player engine with aspect ratio and subtitle overlay."""
 
     def __init__(self, parent=None, placeholder: str = "No signal") -> None:
         super().__init__(parent)
         self.setObjectName("videoFrame")
         self._pixmap: QPixmap | None = None
         self._placeholder = placeholder
+        self._aspect_ratio: str = "auto"  # auto | 16:9 | 4:3 | fill
+        self._subtitle_text: str = ""
 
     @Slot(QImage)
     def set_frame(self, img: QImage) -> None:
@@ -825,20 +857,82 @@ class VideoWidget(QWidget):
         self._pixmap = QPixmap.fromImage(img)
         self.update()  # schedule a repaint in the GUI thread
 
+    def set_aspect_ratio(self, ratio: str) -> None:
+        self._aspect_ratio = (ratio or "auto").lower()
+        self.update()
+
+    def aspect_ratio(self) -> str:
+        return self._aspect_ratio
+
+    def set_subtitle(self, text: str) -> None:
+        self._subtitle_text = text or ""
+        self.update()
+
     def clear(self) -> None:
         """Forget the last frame and show the placeholder again."""
         self._pixmap = None
+        self._subtitle_text = ""
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.black)
         if self._pixmap is not None and not self._pixmap.isNull():
-            scaled = self._pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            w, h = self.width(), self.height()
+            mode = self._aspect_ratio
+            if mode == "fill":
+                painter.drawPixmap(self.rect(), self._pixmap)
+            elif mode == "16:9":
+                target_ratio = 16.0 / 9.0
+                if w / max(1, h) > target_ratio:
+                    target_w = int(h * target_ratio)
+                    target_h = h
+                else:
+                    target_w = w
+                    target_h = int(w / target_ratio)
+                x = (w - target_w) // 2
+                y = (h - target_h) // 2
+                painter.drawPixmap(QRect(x, y, target_w, target_h), self._pixmap)
+            elif mode == "4:3":
+                target_ratio = 4.0 / 3.0
+                if w / max(1, h) > target_ratio:
+                    target_w = int(h * target_ratio)
+                    target_h = h
+                else:
+                    target_w = w
+                    target_h = int(w / target_ratio)
+                x = (w - target_w) // 2
+                y = (h - target_h) // 2
+                painter.drawPixmap(QRect(x, y, target_w, target_h), self._pixmap)
+            else:  # auto
+                scaled = self._pixmap.scaled(
+                    self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                x = (w - scaled.width()) // 2
+                y = (h - scaled.height()) // 2
+                painter.drawPixmap(x, y, scaled)
+
+            # Draw subtitle overlay
+            if self._subtitle_text:
+                painter.setRenderHint(QPainter.Antialiasing)
+                f = QFont("Segoe UI", 12)
+                f.setBold(True)
+                painter.setFont(f)
+                fm = QFontMetrics(f)
+                text_rect = fm.boundingRect(
+                    QRect(20, h - 85, w - 40, 65),
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    self._subtitle_text,
+                )
+                bg_rect = text_rect.adjusted(-10, -4, 10, 4)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 190))
+                painter.drawRoundedRect(bg_rect, 6, 6)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    self._subtitle_text,
+                )
         else:
             painter.setPen(QColor(COLORS["muted"]))
             painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
